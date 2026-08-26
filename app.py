@@ -140,7 +140,7 @@ def init_db():
         )
 
         # ----------------------------------------------------
-        # 每個人的分類
+        # 個人分類
         # ----------------------------------------------------
 
         cursor.execute(
@@ -163,7 +163,7 @@ def init_db():
         )
 
         # ----------------------------------------------------
-        # 每個人的收藏
+        # 個人收藏
         # ----------------------------------------------------
 
         cursor.execute(
@@ -241,14 +241,6 @@ init_db()
 
 # ============================================================
 # 4. 舊版資料 → Eirene
-#
-# 如果之前單人版有：
-# categories
-# links
-#
-# 舊資料統一歸到 Eirene。
-#
-# 這段只會執行一次。
 # ============================================================
 
 def migrate_legacy_data_to_eirene():
@@ -259,7 +251,6 @@ def migrate_legacy_data_to_eirene():
 
         migration_key = "legacy_to_eirene_v3"
 
-        # 已處理過
         if get_meta(
             conn,
             migration_key
@@ -285,9 +276,6 @@ def migrate_legacy_data_to_eirene():
 
         # ----------------------------------------------------
         # 找 Honey
-        #
-        # 如果前一版曾把舊資料放到 Honey，
-        # 這次會清掉對應舊資料。
         # ----------------------------------------------------
 
         honey = cursor.execute(
@@ -305,7 +293,7 @@ def migrate_legacy_data_to_eirene():
         )
 
         # ----------------------------------------------------
-        # 沒有舊 links 表
+        # 沒有舊版 links
         # ----------------------------------------------------
 
         if not table_exists(
@@ -323,9 +311,9 @@ def migrate_legacy_data_to_eirene():
 
             return
 
-        # ====================================================
+        # ----------------------------------------------------
         # 舊分類 → Eirene
-        # ====================================================
+        # ----------------------------------------------------
 
         category_map = {}
 
@@ -383,7 +371,7 @@ def migrate_legacy_data_to_eirene():
                     ] = new_category["id"]
 
         # ----------------------------------------------------
-        # Eirene 的未分類
+        # Eirene 未分類
         # ----------------------------------------------------
 
         uncategorized = cursor.execute(
@@ -404,9 +392,9 @@ def migrate_legacy_data_to_eirene():
             else None
         )
 
-        # ====================================================
+        # ----------------------------------------------------
         # 舊收藏 → Eirene
-        # ====================================================
+        # ----------------------------------------------------
 
         old_links = cursor.execute(
             """
@@ -444,7 +432,7 @@ def migrate_legacy_data_to_eirene():
             )
 
             # ------------------------------------------------
-            # Eirene 是否已有同一筆
+            # 避免重複
             # ------------------------------------------------
 
             already_exists = cursor.execute(
@@ -492,8 +480,8 @@ def migrate_legacy_data_to_eirene():
                 )
 
             # ------------------------------------------------
-            # 如果以前相同舊資料被搬到 Honey
-            # 把該舊資料從 Honey 移除
+            # 如果之前舊資料被搬到 Honey
+            # 將相同舊資料移除
             # ------------------------------------------------
 
             if honey_id:
@@ -528,16 +516,10 @@ migrate_legacy_data_to_eirene()
 
 
 # ============================================================
-# 5. 清理 Honey / Tinney / Lyris 分類
+# 5. Honey / Tinney / Lyris 初始分類清理
 #
-# Eirene 不動。
-#
-# Honey / Tinney / Lyris：
-# - 只留下「未分類」
-# - 已有收藏不刪除
-# - 收藏移入各自的「未分類」
-#
-# 這段只執行一次。
+# 只執行一次。
+# Eirene 完全不動。
 # ============================================================
 
 def reset_other_profiles_categories():
@@ -546,9 +528,6 @@ def reset_other_profiles_categories():
 
         cursor = conn.cursor()
 
-        # 使用新的 v2
-        # 確保你之前就算跑過 v1，
-        # 這一次還是會正式執行。
         migration_key = (
             "reset_other_profiles_categories_v2"
         )
@@ -568,10 +547,6 @@ def reset_other_profiles_categories():
 
         for slug in profile_slugs:
 
-            # ------------------------------------------------
-            # 找使用者
-            # ------------------------------------------------
-
             profile = cursor.execute(
                 """
                 SELECT id
@@ -586,9 +561,7 @@ def reset_other_profiles_categories():
             if not profile:
                 continue
 
-            profile_id = (
-                profile["id"]
-            )
+            profile_id = profile["id"]
 
             # ------------------------------------------------
             # 確保有未分類
@@ -607,10 +580,6 @@ def reset_other_profiles_categories():
                     profile_id,
                 )
             )
-
-            # ------------------------------------------------
-            # 找未分類 ID
-            # ------------------------------------------------
 
             uncategorized = cursor.execute(
                 """
@@ -633,7 +602,7 @@ def reset_other_profiles_categories():
             )
 
             # ------------------------------------------------
-            # 這個人的所有收藏先移到未分類
+            # 收藏全部先放未分類
             # ------------------------------------------------
 
             cursor.execute(
@@ -656,7 +625,7 @@ def reset_other_profiles_categories():
             )
 
             # ------------------------------------------------
-            # 刪除未分類以外所有分類
+            # 刪除其他分類
             # ------------------------------------------------
 
             cursor.execute(
@@ -684,7 +653,7 @@ reset_other_profiles_categories()
 
 
 # ============================================================
-# 6. Profile
+# 6. Profile 功能
 # ============================================================
 
 def get_profile_by_slug(slug):
@@ -901,10 +870,6 @@ def delete_category(
     with get_db() as conn:
 
         cursor = conn.cursor()
-
-        # ----------------------------------------------------
-        # 此人的未分類
-        # ----------------------------------------------------
 
         uncategorized = cursor.execute(
             """
@@ -1373,8 +1338,8 @@ profile = get_profile_by_slug(
 # ============================================================
 # 12. 首頁
 #
-# 2 × 2 大卡片
-# 首頁只顯示這四張
+# 2 × 2
+# 縮小版卡片
 # ============================================================
 
 if not profile:
@@ -1417,7 +1382,7 @@ if not profile:
 
 
     /* =======================================================
-       Streamlit 主內容
+       Streamlit 主容器
        ======================================================= */
 
     [data-testid="stMainBlockContainer"] {
@@ -1428,12 +1393,12 @@ if not profile:
         padding-left: 20px !important;
         padding-right: 20px !important;
 
-        max-width: 950px !important;
+        max-width: 760px !important;
     }
 
 
     /* =======================================================
-       首頁 Wrapper
+       首頁
        ======================================================= */
 
     .profile-wrapper {
@@ -1452,7 +1417,7 @@ if not profile:
 
 
     /* =======================================================
-       固定 2 × 2
+       2 × 2
        ======================================================= */
 
     .profile-grid {
@@ -1467,7 +1432,7 @@ if not profile:
                 minmax(0, 1fr)
             );
 
-        gap: 18px;
+        gap: 14px;
     }
 
 
@@ -1477,11 +1442,11 @@ if not profile:
 
     .profile-card {
 
-        height: 260px;
+        height: 170px;
 
         background: #B196E4;
 
-        border-radius: 28px;
+        border-radius: 22px;
 
         display: flex;
 
@@ -1490,16 +1455,16 @@ if not profile:
 
         color: #212121 !important;
 
-        font-size: 34px;
+        font-size: 27px;
         font-weight: 700;
 
-        letter-spacing: 0.3px;
+        letter-spacing: 0.2px;
 
         text-decoration: none !important;
 
         box-shadow:
-            0 10px 28px
-            rgba(0, 0, 0, 0.30);
+            0 8px 22px
+            rgba(0, 0, 0, 0.25);
 
         transition:
             transform 0.16s ease,
@@ -1518,11 +1483,11 @@ if not profile:
         background: #BDA6E8;
 
         transform:
-            translateY(-4px);
+            translateY(-3px);
 
         box-shadow:
-            0 14px 38px
-            rgba(0, 0, 0, 0.38);
+            0 12px 28px
+            rgba(0, 0, 0, 0.32);
     }
 
 
@@ -1543,24 +1508,24 @@ if not profile:
 
         [data-testid="stMainBlockContainer"] {
 
-            padding-left: 12px !important;
-            padding-right: 12px !important;
+            padding-left: 14px !important;
+            padding-right: 14px !important;
         }
 
 
         .profile-grid {
 
-            gap: 12px;
+            gap: 10px;
         }
 
 
         .profile-card {
 
-            height: 190px;
+            height: 135px;
 
-            border-radius: 22px;
+            border-radius: 18px;
 
-            font-size: 23px;
+            font-size: 20px;
         }
 
     }
@@ -1617,7 +1582,7 @@ profile_name = profile["name"]
 
 
 # ============================================================
-# 14. 切換使用者時清掉暫存狀態
+# 14. 切換使用者時清除暫時狀態
 # ============================================================
 
 if (
@@ -1720,7 +1685,7 @@ with header_right:
 
 
 # ============================================================
-# 17. 取得此人的分類
+# 17. 個人分類
 # ============================================================
 
 categories = fetch_categories(
@@ -1801,10 +1766,6 @@ if active_page == PAGE_ADD:
         clear_on_submit=True
     ):
 
-        # ----------------------------------------------------
-        # 標題
-        # ----------------------------------------------------
-
         link_title = st.text_input(
             "標題",
             placeholder=(
@@ -1812,27 +1773,15 @@ if active_page == PAGE_ADD:
             )
         )
 
-        # ----------------------------------------------------
-        # Link
-        # ----------------------------------------------------
-
         link_url = st.text_input(
             "Link",
             placeholder="https://..."
         )
 
-        # ----------------------------------------------------
-        # 分類
-        # ----------------------------------------------------
-
         selected_cat_name = st.selectbox(
             "分類",
             cat_names
         )
-
-        # ----------------------------------------------------
-        # 儲存
-        # ----------------------------------------------------
 
         submitted = st.form_submit_button(
             "💾 儲存收藏",
@@ -1867,7 +1816,7 @@ if active_page == PAGE_ADD:
                 )
 
                 # --------------------------------------------
-                # 沒有填標題 → 自動抓
+                # 沒標題 → 自動取得
                 # --------------------------------------------
 
                 if not title:
@@ -1937,11 +1886,6 @@ elif active_page == PAGE_LIBRARY:
     library_filter_key = (
         f"library_filter_{profile_slug}"
     )
-
-    # --------------------------------------------------------
-    # 分類如果已被改名 / 刪除
-    # 自動回到全部
-    # --------------------------------------------------------
 
     if (
         library_filter_key
@@ -2093,7 +2037,7 @@ elif active_page == PAGE_LIBRARY:
                 ) = st.columns(2)
 
                 # --------------------------------------------
-                # 儲存
+                # 儲存修改
                 # --------------------------------------------
 
                 with col_save:
@@ -2174,7 +2118,7 @@ elif active_page == PAGE_LIBRARY:
 
 
             # =================================================
-            # 一般收藏顯示
+            # 一般收藏
             # =================================================
 
             else:
@@ -2343,7 +2287,7 @@ elif active_page == PAGE_LIBRARY:
 
 
 # ============================================================
-# PAGE 3：分類管理
+# PAGE 3：分類
 # ============================================================
 
 elif active_page == PAGE_CATEGORIES:
@@ -2657,7 +2601,7 @@ elif active_page == PAGE_CATEGORIES:
                         st.rerun()
 
                 # =================================================
-                # 刪除確認
+                # 刪除分類確認
                 # =================================================
 
                 if (
