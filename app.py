@@ -20,6 +20,10 @@ st.set_page_config(
 
 DB_NAME = "link_vault.db"
 
+PAGE_ADD = "➕ 新增收藏"
+PAGE_LIBRARY = "📚 收藏庫"
+PAGE_CATEGORIES = "🏷️ 分類"
+
 
 # ============================================================
 # 2. 資料庫
@@ -32,8 +36,6 @@ def get_db():
     )
 
     conn.row_factory = sqlite3.Row
-
-    # 啟用 SQLite Foreign Key
     conn.execute("PRAGMA foreign_keys = ON")
 
     return conn
@@ -43,9 +45,9 @@ def init_db():
     with get_db() as conn:
         cursor = conn.cursor()
 
-        # ------------------------
+        # ----------------------------------------------------
         # 分類表
-        # ------------------------
+        # ----------------------------------------------------
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS categories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,9 +55,9 @@ def init_db():
             )
         """)
 
-        # ------------------------
+        # ----------------------------------------------------
         # 收藏表
-        # ------------------------
+        # ----------------------------------------------------
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS links (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,23 +71,41 @@ def init_db():
             )
         """)
 
-        # ------------------------
-        # 預設分類
-        # ------------------------
-        default_categories = [
-            "工作",
-            "貓咪",
-            "旅遊",
-            "未分類"
-        ]
+        # ----------------------------------------------------
+        # 只有第一次建立資料庫時才加入預設分類
+        #
+        # 避免使用者刪掉「工作 / 貓咪 / 旅遊」後，
+        # 下一次重新執行又被建立回來。
+        # ----------------------------------------------------
+        count = cursor.execute(
+            "SELECT COUNT(*) AS count FROM categories"
+        ).fetchone()["count"]
 
-        for category in default_categories:
+        if count == 0:
+
+            default_categories = [
+                "工作",
+                "貓咪",
+                "旅遊",
+                "未分類"
+            ]
+
+            for category in default_categories:
+                cursor.execute(
+                    """
+                    INSERT INTO categories (name)
+                    VALUES (?)
+                    """,
+                    (category,)
+                )
+
+        else:
+            # 「未分類」是安全分類，必須永遠存在
             cursor.execute(
                 """
                 INSERT OR IGNORE INTO categories (name)
-                VALUES (?)
-                """,
-                (category,)
+                VALUES ('未分類')
+                """
             )
 
         conn.commit()
@@ -101,7 +121,7 @@ init_db()
 def fetch_categories():
     """
     取得所有分類。
-    「未分類」固定排在最後。
+    「未分類」固定放最後。
     """
 
     with get_db() as conn:
@@ -117,6 +137,32 @@ def fetch_categories():
         """).fetchall()
 
 
+def fetch_categories_with_counts():
+    """
+    取得分類以及每個分類中的收藏數量。
+    """
+
+    with get_db() as conn:
+        return conn.execute("""
+            SELECT
+                c.id,
+                c.name,
+                COUNT(l.id) AS link_count
+            FROM categories c
+            LEFT JOIN links l
+                ON l.category_id = c.id
+            GROUP BY
+                c.id,
+                c.name
+            ORDER BY
+                CASE
+                    WHEN c.name = '未分類' THEN 1
+                    ELSE 0
+                END,
+                c.name COLLATE NOCASE
+        """).fetchall()
+
+
 def add_category(name):
     """
     新增分類。
@@ -128,6 +174,7 @@ def add_category(name):
         return False
 
     with get_db() as conn:
+
         try:
             conn.execute(
                 """
@@ -142,18 +189,19 @@ def add_category(name):
             return True
 
         except sqlite3.IntegrityError:
+
             return False
 
 
 def rename_category(category_id, new_name):
     """
-    重新命名分類。
+    修改分類名稱。
     """
 
     new_name = new_name.strip()
 
     if not new_name:
-        return False, "分類名稱不能為空白。"
+        return False, "分類名稱不能是空白。"
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -191,39 +239,24 @@ def rename_category(category_id, new_name):
             return True, None
 
         except sqlite3.IntegrityError:
+
             return False, "這個分類名稱已經存在。"
-
-
-def get_category_link_count(category_id):
-    """
-    取得分類中的收藏數量。
-    """
-
-    with get_db() as conn:
-        result = conn.execute(
-            """
-            SELECT COUNT(*) AS count
-            FROM links
-            WHERE category_id = ?
-            """,
-            (category_id,)
-        ).fetchone()
-
-        return result["count"]
 
 
 def delete_category(category_id):
     """
     刪除分類。
 
-    分類中的收藏不會被刪除，
-    而是移到「未分類」。
+    分類裡面的收藏不會刪除，
+    而是全部移到「未分類」。
     """
 
     with get_db() as conn:
         cursor = conn.cursor()
 
-        # 找到「未分類」
+        # ----------------------------------------------------
+        # 找到未分類
+        # ----------------------------------------------------
         uncategorized = cursor.execute(
             """
             SELECT id
@@ -237,13 +270,15 @@ def delete_category(category_id):
 
         uncategorized_id = uncategorized["id"]
 
-        # 不允許刪除「未分類」
+        # ----------------------------------------------------
+        # 未分類本身不能刪除
+        # ----------------------------------------------------
         if category_id == uncategorized_id:
             return False
 
-        # ------------------------
-        # 原分類收藏 → 未分類
-        # ------------------------
+        # ----------------------------------------------------
+        # 原分類中的收藏 → 未分類
+        # ----------------------------------------------------
         cursor.execute(
             """
             UPDATE links
@@ -256,9 +291,9 @@ def delete_category(category_id):
             )
         )
 
-        # ------------------------
+        # ----------------------------------------------------
         # 刪除分類
-        # ------------------------
+        # ----------------------------------------------------
         cursor.execute(
             """
             DELETE FROM categories
@@ -369,10 +404,11 @@ def fetch_links(
 
     params = []
 
-    # ------------------------
+    # --------------------------------------------------------
     # 分類篩選
-    # ------------------------
+    # --------------------------------------------------------
     if category_id is not None:
+
         query += """
             AND l.category_id = ?
         """
@@ -381,12 +417,13 @@ def fetch_links(
             category_id
         )
 
-    # ------------------------
-    # 搜尋
-    # ------------------------
+    # --------------------------------------------------------
+    # 關鍵字搜尋
+    # --------------------------------------------------------
     keyword = keyword.strip()
 
     if keyword:
+
         query += """
             AND (
                 l.title LIKE ?
@@ -422,10 +459,8 @@ def fetch_links(
 
 def normalize_url(url):
     """
-    如果輸入：
     example.com
-
-    自動變成：
+        ↓
     https://example.com
     """
 
@@ -444,10 +479,11 @@ def normalize_url(url):
 
 def is_valid_url(url):
     """
-    簡單檢查網址格式。
+    簡單驗證網址。
     """
 
     try:
+
         parsed = urlparse(url)
 
         return (
@@ -459,6 +495,7 @@ def is_valid_url(url):
         )
 
     except Exception:
+
         return False
 
 
@@ -499,13 +536,11 @@ class TitleParser(HTMLParser):
 
 def get_page_title(url):
     """
-    嘗試取得網頁的 <title>。
-
-    網站若封鎖、逾時或無法取得，
-    會回傳 None。
+    嘗試取得網頁 <title>。
     """
 
     try:
+
         request = Request(
             url,
             headers={
@@ -527,7 +562,7 @@ def get_page_title(url):
             timeout=5
         ) as response:
 
-            # 只讀前 300 KB
+            # 最多讀 300KB
             html = response.read(
                 300_000
             )
@@ -542,12 +577,14 @@ def get_page_title(url):
                 encoding = "utf-8"
 
             try:
+
                 text = html.decode(
                     encoding,
                     errors="ignore"
                 )
 
             except Exception:
+
                 text = html.decode(
                     "utf-8",
                     errors="ignore"
@@ -559,7 +596,6 @@ def get_page_title(url):
 
         title = parser.title.strip()
 
-        # 去掉換行 / 多餘空白
         title = " ".join(
             title.split()
         )
@@ -575,11 +611,12 @@ def get_page_title(url):
 
 def fallback_title(url):
     """
-    抓不到網頁 title 時，
-    使用網站 domain 當標題。
+    抓不到標題時，
+    使用 domain 當標題。
     """
 
     try:
+
         parsed = urlparse(url)
 
         domain = parsed.netloc
@@ -628,20 +665,7 @@ st.caption(
 
 
 # ============================================================
-# 9. 顯示一次性成功訊息
-# ============================================================
-
-if st.session_state.flash_message:
-
-    st.success(
-        st.session_state.flash_message
-    )
-
-    st.session_state.flash_message = None
-
-
-# ============================================================
-# 10. 取得分類
+# 9. 取得目前分類
 # ============================================================
 
 categories = fetch_categories()
@@ -657,21 +681,49 @@ cat_names = list(
 
 
 # ============================================================
-# 11. 三個主要分頁
+# 10. 頁面切換
+#
+# 重點：
+# 不再使用 st.tabs()
+#
+# page_selector 有固定 key，
+# 所以按按鈕造成 rerun 時會保留目前頁面。
 # ============================================================
 
-tab_add, tab_library, tab_categories = st.tabs([
-    "➕ 新增收藏",
-    "📚 收藏庫",
-    "🏷️ 分類"
-])
+active_page = st.segmented_control(
+    "功能",
+    options=[
+        PAGE_ADD,
+        PAGE_LIBRARY,
+        PAGE_CATEGORIES
+    ],
+    selection_mode="single",
+    default=PAGE_ADD,
+    required=True,
+    key="page_selector",
+    label_visibility="collapsed",
+    width="stretch"
+)
 
 
 # ============================================================
-# TAB 1：新增收藏
+# 11. 一次性訊息
 # ============================================================
 
-with tab_add:
+if st.session_state.flash_message:
+
+    st.success(
+        st.session_state.flash_message
+    )
+
+    st.session_state.flash_message = None
+
+
+# ============================================================
+# PAGE 1：新增收藏
+# ============================================================
+
+if active_page == PAGE_ADD:
 
     st.markdown(
         "### 快速收藏"
@@ -682,36 +734,35 @@ with tab_add:
         clear_on_submit=True
     ):
 
-        # ------------------------
+        # ----------------------------------------------------
         # 標題
-        # ------------------------
+        # ----------------------------------------------------
         link_title = st.text_input(
             "標題",
             placeholder=(
-                "可以不填，"
-                "系統會自動嘗試取得"
+                "可以不填，系統會自動取得"
             )
         )
 
-        # ------------------------
+        # ----------------------------------------------------
         # Link
-        # ------------------------
+        # ----------------------------------------------------
         link_url = st.text_input(
             "Link",
             placeholder="https://..."
         )
 
-        # ------------------------
+        # ----------------------------------------------------
         # 分類
-        # ------------------------
+        # ----------------------------------------------------
         selected_cat_name = st.selectbox(
             "分類",
             cat_names
         )
 
-        # ------------------------
+        # ----------------------------------------------------
         # 儲存
-        # ------------------------
+        # ----------------------------------------------------
         submitted = st.form_submit_button(
             "💾 儲存收藏",
             type="primary",
@@ -724,14 +775,12 @@ with tab_add:
                 link_url
             )
 
-            # 沒有網址
             if not url:
 
                 st.error(
                     "請輸入網址。"
                 )
 
-            # 網址格式錯誤
             elif not is_valid_url(url):
 
                 st.error(
@@ -744,9 +793,9 @@ with tab_add:
                     link_title.strip()
                 )
 
-                # ------------------------
-                # 沒標題 → 自動取得
-                # ------------------------
+                # ------------------------------------------------
+                # 如果沒有輸入標題，自動抓網頁標題
+                # ------------------------------------------------
                 if not title:
 
                     with st.spinner(
@@ -757,7 +806,6 @@ with tab_add:
                             get_page_title(url)
                         )
 
-                    # 抓不到 title
                     if not title:
 
                         title = (
@@ -779,18 +827,18 @@ with tab_add:
 
 
 # ============================================================
-# TAB 2：收藏庫
+# PAGE 2：收藏庫
 # ============================================================
 
-with tab_library:
+elif active_page == PAGE_LIBRARY:
 
     st.markdown(
         "### 📚 收藏庫"
     )
 
-    # ------------------------
+    # --------------------------------------------------------
     # 搜尋
-    # ------------------------
+    # --------------------------------------------------------
     search_keyword = st.text_input(
         "搜尋收藏",
         placeholder=(
@@ -799,12 +847,35 @@ with tab_library:
         key="library_search"
     )
 
-    # ------------------------
+    # --------------------------------------------------------
+    # 分類選項
+    # --------------------------------------------------------
+    library_options = (
+        ["全部"]
+        + cat_names
+    )
+
+    # --------------------------------------------------------
+    # 如果之前選的分類已被刪除或改名，
+    # 自動回到全部。
+    #
+    # 必須在建立 selectbox 前處理。
+    # --------------------------------------------------------
+    if (
+        "library_filter"
+        in st.session_state
+        and
+        st.session_state.library_filter
+        not in library_options
+    ):
+        st.session_state.library_filter = "全部"
+
+    # --------------------------------------------------------
     # 分類篩選
-    # ------------------------
+    # --------------------------------------------------------
     filter_cat = st.selectbox(
         "分類",
-        ["全部"] + cat_names,
+        library_options,
         key="library_filter"
     )
 
@@ -823,18 +894,18 @@ with tab_library:
         f"目前共有 {len(links)} 筆收藏"
     )
 
-    # ------------------------
-    # 沒有結果
-    # ------------------------
+    # --------------------------------------------------------
+    # 沒有搜尋結果
+    # --------------------------------------------------------
     if not links:
 
         st.info(
             "目前沒有符合條件的收藏。"
         )
 
-    # ------------------------
+    # --------------------------------------------------------
     # 收藏卡片
-    # ------------------------
+    # --------------------------------------------------------
     for item in links:
 
         link_id = item["id"]
@@ -844,7 +915,7 @@ with tab_library:
         ):
 
             # =================================================
-            # 編輯模式
+            # 編輯收藏模式
             # =================================================
             if (
                 st.session_state.editing_link_id
@@ -858,27 +929,47 @@ with tab_library:
                 edit_title = st.text_input(
                     "標題",
                     value=item["title"],
-                    key=f"edit_title_{link_id}"
+                    key=(
+                        f"edit_title_"
+                        f"{link_id}"
+                    )
                 )
 
                 edit_url = st.text_input(
                     "Link",
                     value=item["url"],
-                    key=f"edit_url_{link_id}"
+                    key=(
+                        f"edit_url_"
+                        f"{link_id}"
+                    )
                 )
 
-                # ------------------------
-                # 現在分類的位置
-                # ------------------------
+                # ------------------------------------------------
+                # 找出目前分類 index
+                # ------------------------------------------------
                 try:
+
                     current_index = (
                         cat_names.index(
-                            item["category_name"]
+                            item[
+                                "category_name"
+                            ]
                         )
                     )
 
-                except ValueError:
-                    current_index = 0
+                except (
+                    ValueError,
+                    TypeError
+                ):
+
+                    current_index = (
+                        cat_names.index(
+                            "未分類"
+                        )
+                        if "未分類"
+                        in cat_names
+                        else 0
+                    )
 
                 edit_category = st.selectbox(
                     "分類",
@@ -897,21 +988,28 @@ with tab_library:
                         or ""
                     ),
                     placeholder="可選填",
-                    key=f"edit_note_{link_id}"
+                    key=(
+                        f"edit_note_"
+                        f"{link_id}"
+                    )
                 )
 
-                col_save, col_cancel = (
-                    st.columns(2)
-                )
+                (
+                    col_save,
+                    col_cancel
+                ) = st.columns(2)
 
-                # ------------------------
-                # 儲存
-                # ------------------------
+                # ------------------------------------------------
+                # 儲存修改
+                # ------------------------------------------------
                 with col_save:
 
                     if st.button(
                         "💾 儲存修改",
-                        key=f"save_{link_id}",
+                        key=(
+                            f"save_"
+                            f"{link_id}"
+                        ),
                         type="primary",
                         use_container_width=True
                     ):
@@ -956,13 +1054,15 @@ with tab_library:
 
                             st.session_state[
                                 "flash_message"
-                            ] = "✅ 收藏已更新。"
+                            ] = (
+                                "✅ 收藏已更新。"
+                            )
 
                             st.rerun()
 
-                # ------------------------
-                # 取消
-                # ------------------------
+                # ------------------------------------------------
+                # 取消修改
+                # ------------------------------------------------
                 with col_cancel:
 
                     if st.button(
@@ -982,7 +1082,7 @@ with tab_library:
 
 
             # =================================================
-            # 一般模式
+            # 一般收藏顯示
             # =================================================
             else:
 
@@ -1001,18 +1101,18 @@ with tab_library:
                     f"🕒 {item['created_at']}"
                 )
 
-                # ------------------------
+                # ------------------------------------------------
                 # 備註
-                # ------------------------
+                # ------------------------------------------------
                 if item["note"]:
 
                     st.write(
                         item["note"]
                     )
 
-                # ------------------------
-                # 操作
-                # ------------------------
+                # ------------------------------------------------
+                # 操作按鈕
+                # ------------------------------------------------
                 (
                     col_open,
                     col_edit,
@@ -1021,7 +1121,9 @@ with tab_library:
                     [3, 1, 1]
                 )
 
+                # ------------------------------------------------
                 # 開啟
+                # ------------------------------------------------
                 with col_open:
 
                     st.link_button(
@@ -1030,12 +1132,17 @@ with tab_library:
                         use_container_width=True
                     )
 
+                # ------------------------------------------------
                 # 編輯
+                # ------------------------------------------------
                 with col_edit:
 
                     if st.button(
                         "✏️",
-                        key=f"edit_{link_id}",
+                        key=(
+                            f"edit_"
+                            f"{link_id}"
+                        ),
                         help="編輯收藏",
                         use_container_width=True
                     ):
@@ -1050,12 +1157,17 @@ with tab_library:
 
                         st.rerun()
 
+                # ------------------------------------------------
                 # 刪除
+                # ------------------------------------------------
                 with col_delete:
 
                     if st.button(
                         "🗑️",
-                        key=f"delete_{link_id}",
+                        key=(
+                            f"delete_"
+                            f"{link_id}"
+                        ),
                         help="刪除收藏",
                         use_container_width=True
                     ):
@@ -1070,9 +1182,9 @@ with tab_library:
 
                         st.rerun()
 
-                # ------------------------
-                # 刪除確認
-                # ------------------------
+                # =================================================
+                # 刪除收藏確認
+                # =================================================
                 if (
                     st.session_state.delete_link_id
                     == link_id
@@ -1088,6 +1200,9 @@ with tab_library:
                         cancel_col
                     ) = st.columns(2)
 
+                    # ------------------------------------------------
+                    # 確認刪除
+                    # ------------------------------------------------
                     with confirm_col:
 
                         if st.button(
@@ -1110,10 +1225,15 @@ with tab_library:
 
                             st.session_state[
                                 "flash_message"
-                            ] = "🗑️ 收藏已刪除。"
+                            ] = (
+                                "🗑️ 收藏已刪除。"
+                            )
 
                             st.rerun()
 
+                    # ------------------------------------------------
+                    # 取消
+                    # ------------------------------------------------
                     with cancel_col:
 
                         if st.button(
@@ -1133,10 +1253,10 @@ with tab_library:
 
 
 # ============================================================
-# TAB 3：分類管理
+# PAGE 3：分類管理
 # ============================================================
 
-with tab_categories:
+elif active_page == PAGE_CATEGORIES:
 
     st.markdown(
         "### 🏷️ 分類管理"
@@ -1155,8 +1275,12 @@ with tab_categories:
         "#### ＋ 新增分類"
     )
 
+    # --------------------------------------------------------
     # 使用 Form + clear_on_submit
-    # 不再手動修改 text_input 對應的 session_state
+    #
+    # 避免先前發生的：
+    # StreamlitAPIException
+    # --------------------------------------------------------
     with st.form(
         "add_category_form",
         clear_on_submit=True
@@ -1193,8 +1317,6 @@ with tab_categories:
                 category_name
             ):
 
-                # 使用 flash message，
-                # 不修改 widget 本身的 state
                 st.session_state[
                     "flash_message"
                 ] = (
@@ -1202,6 +1324,9 @@ with tab_categories:
                     f"「{category_name}」。"
                 )
 
+                # ------------------------------------------------
+                # 現在 rerun 後仍會停留在「分類」
+                # ------------------------------------------------
                 st.rerun()
 
             else:
@@ -1222,9 +1347,8 @@ with tab_categories:
         "#### 我的分類"
     )
 
-    # 重新取得最新分類
     category_list = (
-        fetch_categories()
+        fetch_categories_with_counts()
     )
 
     for category in category_list:
@@ -1238,9 +1362,7 @@ with tab_categories:
         )
 
         link_count = (
-            get_category_link_count(
-                category_id
-            )
+            category["link_count"]
         )
 
         with st.container(
@@ -1302,9 +1424,9 @@ with tab_categories:
                     col_cancel
                 ) = st.columns(2)
 
-                # ------------------------
+                # ------------------------------------------------
                 # 儲存
-                # ------------------------
+                # ------------------------------------------------
                 with col_save:
 
                     if st.button(
@@ -1344,9 +1466,9 @@ with tab_categories:
                                 error
                             )
 
-                # ------------------------
+                # ------------------------------------------------
                 # 取消
-                # ------------------------
+                # ------------------------------------------------
                 with col_cancel:
 
                     if st.button(
@@ -1378,9 +1500,9 @@ with tab_categories:
                     [5, 1, 1]
                 )
 
-                # ------------------------
+                # ------------------------------------------------
                 # 分類資訊
-                # ------------------------
+                # ------------------------------------------------
                 with col_info:
 
                     st.markdown(
@@ -1391,9 +1513,9 @@ with tab_categories:
                         f"{link_count} 筆收藏"
                     )
 
-                # ------------------------
+                # ------------------------------------------------
                 # 修改分類
-                # ------------------------
+                # ------------------------------------------------
                 with col_edit:
 
                     if st.button(
@@ -1416,9 +1538,9 @@ with tab_categories:
 
                         st.rerun()
 
-                # ------------------------
+                # ------------------------------------------------
                 # 刪除分類
-                # ------------------------
+                # ------------------------------------------------
                 with col_delete:
 
                     if st.button(
@@ -1445,7 +1567,6 @@ with tab_categories:
                 # =================================================
                 # 刪除分類確認
                 # =================================================
-
                 if (
                     st.session_state.delete_category_id
                     == category_id
@@ -1473,9 +1594,9 @@ with tab_categories:
                         col_cancel
                     ) = st.columns(2)
 
-                    # ------------------------
+                    # ------------------------------------------------
                     # 確定刪除
-                    # ------------------------
+                    # ------------------------------------------------
                     with col_confirm:
 
                         if st.button(
@@ -1509,9 +1630,9 @@ with tab_categories:
 
                             st.rerun()
 
-                    # ------------------------
+                    # ------------------------------------------------
                     # 取消
-                    # ------------------------
+                    # ------------------------------------------------
                     with col_cancel:
 
                         if st.button(
