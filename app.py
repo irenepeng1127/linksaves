@@ -1009,7 +1009,7 @@ if st.session_state["flash_message"]:
 # ============================================================
 
 if active_page == PAGE_ADD:
-    st.markdown("### 快速收藏")
+    st.markdown("### 🎯 快速收藏")
 
     with st.form(
         "add_link_form_eirene",
