@@ -1293,7 +1293,7 @@ elif active_page == PAGE_LIBRARY:
 # ============================================================
 
 elif active_page == PAGE_CATEGORIES:
-    st.markdown("### 🏷️ 分類管理")
+    st.markdown("### 🎞 分類管理")
     st.caption("新增、重新命名或刪除你的收藏分類。")
 
     st.markdown("#### ＋ 新增分類")
