@@ -1,5 +1,6 @@
 [client]
 toolbarMode = "minimal"
+showErrorDetails = "none"
 
 [theme]
 base = "dark"
@@ -7,3 +8,6 @@ primaryColor = "#B196E4"
 backgroundColor = "#212121"
 secondaryBackgroundColor = "#292930"
 textColor = "#FFFFFF"
+
+[browser]
+gatherUsageStats = false
