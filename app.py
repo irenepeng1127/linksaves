@@ -1,7 +1,6 @@
-import sqlite3
 from datetime import datetime
 from html.parser import HTMLParser
-from pathlib import Path
+import time
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -24,1197 +23,563 @@ PAGE_ADD = "➕ 新增收藏"
 PAGE_LIBRARY = "📚 收藏庫"
 PAGE_CATEGORIES = "🏷️ 分類"
 
-
-# ============================================================
-# 2. 家庭成員
-# ============================================================
-
-PROFILES = [
-    {"slug": "honey", "name": "Honey"},
-    {"slug": "eirene", "name": "Eirene"},
-    {"slug": "tinney", "name": "Tinney"},
-    {"slug": "lyris", "name": "Lyris"},
-]
+PROFILE_SLUG = "eirene"
+PROFILE_NAME = "Eirene"
+PROFILE_ICON = "💜"
 
 
 # ============================================================
-# 3. Supabase 連線
+# 2. Supabase 連線
 #
 # Streamlit Cloud → App settings → Secrets：
 #
 # [supabase]
 # url = "https://xxxx.supabase.co"
 # key = "sb_secret_xxxxxxxxx"
-#
-# 不要把 Secret Key 直接寫進程式或 GitHub。
 # ============================================================
 
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def get_db() -> Client:
-
     try:
         supabase_url = st.secrets["supabase"]["url"]
         supabase_key = st.secrets["supabase"]["key"]
-
     except Exception:
-
         st.error(
             "尚未設定 Supabase 連線。\n\n"
-            "請到 Streamlit App settings → Secrets 加入：\n\n"
+            "請到 Streamlit → App settings → Secrets 加入：\n\n"
             '[supabase]\n'
             'url = "https://你的專案.supabase.co"\n'
             'key = "sb_secret_..."'
         )
-
         st.stop()
 
-    return create_client(
-        supabase_url,
-        supabase_key
+    return create_client(supabase_url, supabase_key)
+
+
+def execute_with_retry(operation, attempts=3):
+    """Supabase 遇到短暫網路問題時，自動重試。"""
+    last_error = None
+
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except Exception as exc:
+            last_error = exc
+
+            if attempt < attempts - 1:
+                time.sleep(0.35 * (attempt + 1))
+
+    raise last_error
+
+
+def show_connection_error(exc):
+    st.error(
+        "Supabase 暫時連線失敗。程式已自動重試，但目前仍無法取得資料。"
     )
+    st.caption(
+        "這通常是暫時性的網路或服務連線問題，不代表收藏資料消失。"
+    )
+
+    with st.expander("技術資訊"):
+        st.code(str(exc))
+
+    if st.button("重新連線", type="primary", use_container_width=True):
+        st.cache_resource.clear()
+        st.cache_data.clear()
+        st.rerun()
+
+    st.stop()
 
 
 # ============================================================
-# 4. Supabase 小工具
-# ============================================================
-
-def get_meta(key):
-
-    db = get_db()
-
-    response = (
-        db.table("app_meta")
-        .select("value")
-        .eq("key", key)
-        .limit(1)
-        .execute()
-    )
-
-    rows = response.data or []
-
-    if rows:
-        return rows[0]["value"]
-
-    return None
-
-
-def set_meta(
-    key,
-    value
-):
-
-    db = get_db()
-
-    (
-        db.table("app_meta")
-        .upsert(
-            {
-                "key": key,
-                "value": value,
-            },
-            on_conflict="key",
-        )
-        .execute()
-    )
-
-
-def find_profile_by_slug(slug):
-
-    if not slug:
-        return None
-
-    db = get_db()
-
-    response = (
-        db.table("profiles")
-        .select("*")
-        .eq("slug", slug.strip().lower())
-        .limit(1)
-        .execute()
-    )
-
-    rows = response.data or []
-
-    return rows[0] if rows else None
-
-
-def get_profile_by_slug(slug):
-
-    return find_profile_by_slug(slug)
-
-
-def _find_category_by_name(
-    profile_id,
-    name
-):
-
-    db = get_db()
-
-    response = (
-        db.table("profile_categories")
-        .select("*")
-        .eq("profile_id", profile_id)
-        .execute()
-    )
-
-    wanted = name.strip().casefold()
-
-    for row in (response.data or []):
-
-        if (
-            str(row.get("name", ""))
-            .strip()
-            .casefold()
-            == wanted
-        ):
-            return row
-
-    return None
-
-
-def _ensure_category(
-    profile_id,
-    name
-):
-
-    existing = _find_category_by_name(
-        profile_id,
-        name
-    )
-
-    if existing:
-        return existing["id"]
-
-    db = get_db()
-
-    response = (
-        db.table("profile_categories")
-        .insert(
-            {
-                "profile_id": profile_id,
-                "name": name.strip(),
-            }
-        )
-        .execute()
-    )
-
-    rows = response.data or []
-
-    if rows:
-        return rows[0]["id"]
-
-    # 極少數情況下，如果另一個 request 同時建立，
-    # 再讀一次即可。
-    existing = _find_category_by_name(
-        profile_id,
-        name
-    )
-
-    if existing:
-        return existing["id"]
-
-    raise RuntimeError(
-        f"無法建立分類：{name}"
-    )
-
-
-# ============================================================
-# 5. 初始化 Supabase 基本資料
+# 3. Eirene 初始化
 #
-# 資料表本身請先執行我附上的 supabase_setup.sql。
-# 這裡只負責建立固定四位 Profile 與各自的「未分類」。
+# 只在 Streamlit 程序啟動時執行一次。
+# 不會在每次按按鈕、切頁時重新查四個使用者。
 # ============================================================
 
-def init_db():
-
+@st.cache_resource(show_spinner=False)
+def ensure_eirene_profile():
     db = get_db()
 
-    try:
+    response = execute_with_retry(
+        lambda: (
+            db.table("profiles")
+            .select("id,slug,name")
+            .eq("slug", PROFILE_SLUG)
+            .limit(1)
+            .execute()
+        )
+    )
 
-        for profile in PROFILES:
+    rows = response.data or []
 
-            (
+    if rows:
+        profile = rows[0]
+    else:
+        response = execute_with_retry(
+            lambda: (
                 db.table("profiles")
-                .upsert(
+                .insert(
                     {
-                        "slug": profile["slug"],
-                        "name": profile["name"],
-                    },
-                    on_conflict="slug",
+                        "slug": PROFILE_SLUG,
+                        "name": PROFILE_NAME,
+                    }
                 )
                 .execute()
             )
+        )
 
-        response = (
-            db.table("profiles")
-            .select("id,slug,name")
+        rows = response.data or []
+
+        if not rows:
+            raise RuntimeError("無法建立 Eirene profile。")
+
+        profile = rows[0]
+
+    profile_id = profile["id"]
+
+    # 確保 Eirene 至少有「未分類」
+    response = execute_with_retry(
+        lambda: (
+            db.table("profile_categories")
+            .select("id,name")
+            .eq("profile_id", profile_id)
+            .eq("name", "未分類")
+            .limit(1)
             .execute()
         )
+    )
 
-        for profile in (response.data or []):
-
-            if profile["slug"] in {
-                "honey",
-                "eirene",
-                "tinney",
-                "lyris",
-            }:
-
-                _ensure_category(
-                    profile["id"],
-                    "未分類"
+    if not (response.data or []):
+        execute_with_retry(
+            lambda: (
+                db.table("profile_categories")
+                .insert(
+                    {
+                        "profile_id": profile_id,
+                        "name": "未分類",
+                    }
                 )
-
-    except Exception as exc:
-
-        st.error(
-            "Supabase 已連線，但資料表尚未建立或權限設定不完整。\n\n"
-            "請先到 Supabase → SQL Editor 執行我附上的 "
-            "`supabase_setup.sql`。"
+                .execute()
+            )
         )
 
-        st.code(
-            str(exc)
-        )
+    return {
+        "id": profile_id,
+        "slug": PROFILE_SLUG,
+        "name": PROFILE_NAME,
+    }
 
-        st.stop()
 
+try:
+    PROFILE = ensure_eirene_profile()
+except Exception as exc:
+    show_connection_error(exc)
 
-init_db()
+PROFILE_ID = PROFILE["id"]
 
 
 # ============================================================
-# 6. 一次性：如果目前環境還找得到舊 link_vault.db，
-#    自動把 SQLite 資料搬到 Supabase。
+# 4. Cache
 #
-# 注意：
-# - 這只是「搶救／搬家」功能。
-# - 搬完後，所有新增／修改／刪除都只寫 Supabase。
-# - 舊單人版 categories / links 會歸到 Eirene。
+# 搜尋、切頁、打字造成 Streamlit rerun 時，
+# 不會一直重查 Supabase。
 # ============================================================
 
-LOCAL_SQLITE_PATH = Path("link_vault.db")
-
-
-def sqlite_table_exists(
-    conn,
-    table_name
-):
-
-    row = conn.execute(
-        """
-        SELECT name
-        FROM sqlite_master
-        WHERE type = 'table'
-        AND name = ?
-        """,
-        (table_name,)
-    ).fetchone()
-
-    return row is not None
-
-
-def _remote_link_exists(
-    profile_id,
-    title,
-    url,
-    created_at
-):
-
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_categories_cached(profile_id):
     db = get_db()
 
-    query = (
-        db.table("profile_links")
-        .select("id")
-        .eq("profile_id", profile_id)
-        .eq("title", title)
-        .eq("url", url)
-        .eq("created_at", created_at or "")
-        .limit(1)
-    )
-
-    response = query.execute()
-
-    return bool(
-        response.data
-    )
-
-
-def _insert_remote_link_if_missing(
-    profile_id,
-    title,
-    url,
-    category_id,
-    note,
-    created_at
-):
-
-    created_at = (
-        created_at
-        or ""
-    )
-
-    if _remote_link_exists(
-        profile_id,
-        title,
-        url,
-        created_at
-    ):
-        return
-
-    db = get_db()
-
-    (
-        db.table("profile_links")
-        .insert(
-            {
-                "profile_id": profile_id,
-                "title": title or "未命名收藏",
-                "url": url or "",
-                "category_id": category_id,
-                "note": note or "",
-                "created_at": created_at,
-            }
+    response = execute_with_retry(
+        lambda: (
+            db.table("profile_categories")
+            .select("id,profile_id,name")
+            .eq("profile_id", profile_id)
+            .execute()
         )
-        .execute()
     )
 
-
-def migrate_local_sqlite_to_supabase():
-
-    # 已搬過就不再重複
-    if get_meta(
-        "sqlite_import_v1"
-    ) == "1":
-        return
-
-    # 目前環境沒有舊 SQLite，就先略過。
-    # 不寫入完成標記，避免日後有 DB 檔時失去搬家機會。
-    if not LOCAL_SQLITE_PATH.exists():
-        return
-
-    try:
-
-        local = sqlite3.connect(
-            LOCAL_SQLITE_PATH
-        )
-
-        local.row_factory = sqlite3.Row
-
-        # ----------------------------------------------------
-        # A. 新版多 Profile SQLite
-        # ----------------------------------------------------
-
-        if (
-            sqlite_table_exists(
-                local,
-                "profiles"
-            )
-            and sqlite_table_exists(
-                local,
-                "profile_categories"
-            )
-        ):
-
-            local_profiles = local.execute(
-                """
-                SELECT *
-                FROM profiles
-                """
-            ).fetchall()
-
-            profile_id_map = {}
-
-            for local_profile in local_profiles:
-
-                slug = (
-                    local_profile["slug"]
-                    or ""
-                ).strip().lower()
-
-                name = (
-                    local_profile["name"]
-                    or slug
-                    or "User"
-                )
-
-                if not slug:
-                    continue
-
-                db = get_db()
-
-                (
-                    db.table("profiles")
-                    .upsert(
-                        {
-                            "slug": slug,
-                            "name": name,
-                        },
-                        on_conflict="slug",
-                    )
-                    .execute()
-                )
-
-                remote_profile = (
-                    find_profile_by_slug(
-                        slug
-                    )
-                )
-
-                if remote_profile:
-
-                    profile_id_map[
-                        local_profile["id"]
-                    ] = remote_profile["id"]
-
-            category_id_map = {}
-
-            local_categories = local.execute(
-                """
-                SELECT *
-                FROM profile_categories
-                ORDER BY id
-                """
-            ).fetchall()
-
-            for local_category in local_categories:
-
-                remote_profile_id = (
-                    profile_id_map.get(
-                        local_category["profile_id"]
-                    )
-                )
-
-                if not remote_profile_id:
-                    continue
-
-                remote_category_id = (
-                    _ensure_category(
-                        remote_profile_id,
-                        local_category["name"]
-                        or "未分類"
-                    )
-                )
-
-                category_id_map[
-                    local_category["id"]
-                ] = remote_category_id
-
-            if sqlite_table_exists(
-                local,
-                "profile_links"
-            ):
-
-                local_links = local.execute(
-                    """
-                    SELECT *
-                    FROM profile_links
-                    ORDER BY id
-                    """
-                ).fetchall()
-
-                for local_link in local_links:
-
-                    remote_profile_id = (
-                        profile_id_map.get(
-                            local_link["profile_id"]
-                        )
-                    )
-
-                    if not remote_profile_id:
-                        continue
-
-                    category_id = (
-                        category_id_map.get(
-                            local_link["category_id"]
-                        )
-                    )
-
-                    if not category_id:
-
-                        category_id = (
-                            _ensure_category(
-                                remote_profile_id,
-                                "未分類"
-                            )
-                        )
-
-                    _insert_remote_link_if_missing(
-                        profile_id=remote_profile_id,
-                        title=(
-                            local_link["title"]
-                            or "未命名收藏"
-                        ),
-                        url=(
-                            local_link["url"]
-                            or ""
-                        ),
-                        category_id=category_id,
-                        note=(
-                            local_link["note"]
-                            or ""
-                        ),
-                        created_at=(
-                            local_link["created_at"]
-                            or ""
-                        ),
-                    )
-
-        # ----------------------------------------------------
-        # B. 更舊的單人 SQLite
-        #    統一匯入 Eirene
-        # ----------------------------------------------------
-
-        if sqlite_table_exists(
-            local,
-            "links"
-        ):
-
-            eirene = find_profile_by_slug(
-                "eirene"
-            )
-
-            if eirene:
-
-                eirene_id = eirene["id"]
-
-                legacy_category_map = {}
-
-                if sqlite_table_exists(
-                    local,
-                    "categories"
-                ):
-
-                    legacy_categories = (
-                        local.execute(
-                            """
-                            SELECT *
-                            FROM categories
-                            ORDER BY id
-                            """
-                        ).fetchall()
-                    )
-
-                    for category in legacy_categories:
-
-                        remote_category_id = (
-                            _ensure_category(
-                                eirene_id,
-                                category["name"]
-                                or "未分類"
-                            )
-                        )
-
-                        legacy_category_map[
-                            category["id"]
-                        ] = remote_category_id
-
-                legacy_links = local.execute(
-                    """
-                    SELECT *
-                    FROM links
-                    ORDER BY id
-                    """
-                ).fetchall()
-
-                for link in legacy_links:
-
-                    category_id = (
-                        legacy_category_map.get(
-                            link["category_id"]
-                        )
-                    )
-
-                    if not category_id:
-
-                        category_id = (
-                            _ensure_category(
-                                eirene_id,
-                                "未分類"
-                            )
-                        )
-
-                    _insert_remote_link_if_missing(
-                        profile_id=eirene_id,
-                        title=(
-                            link["title"]
-                            or "未命名收藏"
-                        ),
-                        url=(
-                            link["url"]
-                            or ""
-                        ),
-                        category_id=category_id,
-                        note=(
-                            link["note"]
-                            or ""
-                        ),
-                        created_at=(
-                            link["created_at"]
-                            or ""
-                        ),
-                    )
-
-        local.close()
-
-        set_meta(
-            "sqlite_import_v1",
-            "1"
-        )
-
-    except Exception as exc:
-
-        # 不讓搬家失敗影響正常使用。
-        # App 仍然會使用 Supabase 永久儲存。
-        print(
-            "SQLite → Supabase migration skipped:",
-            exc
-        )
-
-
-migrate_local_sqlite_to_supabase()
-
-
-# ============================================================
-# 7. 分類功能
-# ============================================================
-
-def fetch_categories(
-    profile_id
-):
-
-    db = get_db()
-
-    response = (
-        db.table("profile_categories")
-        .select("*")
-        .eq("profile_id", profile_id)
-        .execute()
-    )
-
-    rows = response.data or []
+    rows = [dict(row) for row in (response.data or [])]
 
     rows.sort(
         key=lambda row: (
-            1
-            if row["name"] == "未分類"
-            else 0,
-            str(row["name"]).casefold(),
+            1 if row.get("name") == "未分類" else 0,
+            str(row.get("name", "")).casefold(),
         )
     )
 
     return rows
 
 
-def fetch_categories_with_counts(
-    profile_id
-):
-
-    categories = fetch_categories(
-        profile_id
-    )
-
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_all_links_cached(profile_id):
     db = get_db()
 
-    response = (
-        db.table("profile_links")
-        .select("id,category_id")
-        .eq("profile_id", profile_id)
-        .execute()
+    response = execute_with_retry(
+        lambda: (
+            db.table("profile_links")
+            .select("id,profile_id,title,url,category_id,note,created_at")
+            .eq("profile_id", profile_id)
+            .order("id", desc=True)
+            .execute()
+        )
     )
+
+    return [dict(row) for row in (response.data or [])]
+
+
+def clear_category_cache():
+    fetch_categories_cached.clear()
+
+
+def clear_link_cache():
+    fetch_all_links_cached.clear()
+
+
+def clear_all_data_cache():
+    clear_category_cache()
+    clear_link_cache()
+
+
+# ============================================================
+# 5. 分類功能
+# ============================================================
+
+
+def fetch_categories(profile_id):
+    return fetch_categories_cached(profile_id)
+
+
+def find_category_by_name(profile_id, name):
+    wanted = name.strip().casefold()
+
+    for category in fetch_categories(profile_id):
+        if str(category.get("name", "")).strip().casefold() == wanted:
+            return category
+
+    return None
+
+
+def fetch_categories_with_counts(profile_id):
+    categories = fetch_categories(profile_id)
+    links = fetch_all_links_cached(profile_id)
 
     counts = {}
 
-    for link in (response.data or []):
+    for link in links:
+        category_id = link.get("category_id")
+        counts[category_id] = counts.get(category_id, 0) + 1
 
-        category_id = (
-            link.get("category_id")
-        )
-
-        counts[category_id] = (
-            counts.get(
-                category_id,
-                0
-            )
-            + 1
-        )
-
-    result = []
-
-    for category in categories:
-
-        result.append(
-            {
-                "id": category["id"],
-                "name": category["name"],
-                "link_count": counts.get(
-                    category["id"],
-                    0
-                ),
-            }
-        )
-
-    return result
+    return [
+        {
+            "id": category["id"],
+            "name": category["name"],
+            "link_count": counts.get(category["id"], 0),
+        }
+        for category in categories
+    ]
 
 
-def add_category(
-    profile_id,
-    name
-):
-
+def add_category(profile_id, name):
     name = name.strip()
 
     if not name:
         return False
 
-    if _find_category_by_name(
-        profile_id,
-        name
-    ):
+    if find_category_by_name(profile_id, name):
         return False
 
     db = get_db()
 
     try:
-
-        (
-            db.table("profile_categories")
-            .insert(
-                {
-                    "profile_id": profile_id,
-                    "name": name,
-                }
+        execute_with_retry(
+            lambda: (
+                db.table("profile_categories")
+                .insert(
+                    {
+                        "profile_id": profile_id,
+                        "name": name,
+                    }
+                )
+                .execute()
             )
-            .execute()
         )
-
+        clear_category_cache()
         return True
-
     except Exception:
-
         return False
 
 
-def rename_category(
-    profile_id,
-    category_id,
-    new_name
-):
-
+def rename_category(profile_id, category_id, new_name):
     new_name = new_name.strip()
 
     if not new_name:
+        return False, "分類名稱不能為空白。"
 
-        return (
-            False,
-            "分類名稱不能為空白。"
-        )
+    categories = fetch_categories(profile_id)
+
+    category = next(
+        (
+            item
+            for item in categories
+            if item["id"] == category_id
+        ),
+        None,
+    )
+
+    if not category:
+        return False, "找不到這個分類。"
+
+    if category["name"] == "未分類":
+        return False, "「未分類」不能重新命名。"
+
+    duplicate = next(
+        (
+            item
+            for item in categories
+            if item["id"] != category_id
+            and str(item["name"]).casefold() == new_name.casefold()
+        ),
+        None,
+    )
+
+    if duplicate:
+        return False, "這個分類名稱已經存在。"
 
     db = get_db()
 
-    response = (
-        db.table("profile_categories")
-        .select("*")
-        .eq("id", category_id)
-        .eq("profile_id", profile_id)
-        .limit(1)
-        .execute()
-    )
-
-    rows = response.data or []
-
-    if not rows:
-
-        return (
-            False,
-            "找不到這個分類。"
-        )
-
-    category = rows[0]
-
-    if category["name"] == "未分類":
-
-        return (
-            False,
-            "「未分類」不能重新命名。"
-        )
-
-    existing = _find_category_by_name(
-        profile_id,
-        new_name
-    )
-
-    if (
-        existing
-        and existing["id"] != category_id
-    ):
-
-        return (
-            False,
-            "這個分類名稱已經存在。"
-        )
-
     try:
-
-        (
-            db.table("profile_categories")
-            .update(
-                {
-                    "name": new_name,
-                }
+        execute_with_retry(
+            lambda: (
+                db.table("profile_categories")
+                .update({"name": new_name})
+                .eq("id", category_id)
+                .eq("profile_id", profile_id)
+                .execute()
             )
-            .eq("id", category_id)
-            .eq("profile_id", profile_id)
-            .execute()
         )
-
-        return (
-            True,
-            None
-        )
-
-    except Exception:
-
-        return (
-            False,
-            "分類名稱更新失敗。"
-        )
+        clear_category_cache()
+        return True, None
+    except Exception as exc:
+        return False, f"分類更新失敗：{exc}"
 
 
-def delete_category(
-    profile_id,
-    category_id
-):
+def delete_category(profile_id, category_id):
+    categories = fetch_categories(profile_id)
 
-    uncategorized = (
-        _find_category_by_name(
-            profile_id,
-            "未分類"
-        )
+    uncategorized = next(
+        (
+            item
+            for item in categories
+            if item["name"] == "未分類"
+        ),
+        None,
     )
 
     if not uncategorized:
         return False
 
-    uncategorized_id = (
-        uncategorized["id"]
-    )
+    uncategorized_id = uncategorized["id"]
 
     if category_id == uncategorized_id:
         return False
 
     db = get_db()
 
-    # 收藏先移到未分類
-    (
-        db.table("profile_links")
-        .update(
-            {
-                "category_id": uncategorized_id,
-            }
+    execute_with_retry(
+        lambda: (
+            db.table("profile_links")
+            .update({"category_id": uncategorized_id})
+            .eq("profile_id", profile_id)
+            .eq("category_id", category_id)
+            .execute()
         )
-        .eq("profile_id", profile_id)
-        .eq("category_id", category_id)
-        .execute()
     )
 
-    # 再刪分類
-    (
-        db.table("profile_categories")
-        .delete()
-        .eq("id", category_id)
-        .eq("profile_id", profile_id)
-        .execute()
+    execute_with_retry(
+        lambda: (
+            db.table("profile_categories")
+            .delete()
+            .eq("id", category_id)
+            .eq("profile_id", profile_id)
+            .execute()
+        )
     )
 
+    clear_all_data_cache()
     return True
 
 
 # ============================================================
-# 8. 收藏功能
+# 6. 收藏功能
 # ============================================================
 
-def add_link(
-    profile_id,
-    title,
-    url,
-    category_id,
-    note=""
-):
 
-    now = datetime.now().strftime(
-        "%Y-%m-%d %H:%M"
-    )
-
+def add_link(profile_id, title, url, category_id, note=""):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
     db = get_db()
 
-    (
-        db.table("profile_links")
-        .insert(
-            {
-                "profile_id": profile_id,
-                "title": title.strip(),
-                "url": url.strip(),
-                "category_id": category_id,
-                "note": note.strip(),
-                "created_at": now,
-            }
+    execute_with_retry(
+        lambda: (
+            db.table("profile_links")
+            .insert(
+                {
+                    "profile_id": profile_id,
+                    "title": title.strip(),
+                    "url": url.strip(),
+                    "category_id": category_id,
+                    "note": note.strip(),
+                    "created_at": now,
+                }
+            )
+            .execute()
         )
-        .execute()
     )
 
+    clear_link_cache()
 
-def update_link(
-    profile_id,
-    link_id,
-    title,
-    url,
-    category_id,
-    note=""
-):
 
+def update_link(profile_id, link_id, title, url, category_id, note=""):
     db = get_db()
 
-    (
-        db.table("profile_links")
-        .update(
-            {
-                "title": title.strip(),
-                "url": url.strip(),
-                "category_id": category_id,
-                "note": note.strip(),
-            }
+    execute_with_retry(
+        lambda: (
+            db.table("profile_links")
+            .update(
+                {
+                    "title": title.strip(),
+                    "url": url.strip(),
+                    "category_id": category_id,
+                    "note": note.strip(),
+                }
+            )
+            .eq("id", link_id)
+            .eq("profile_id", profile_id)
+            .execute()
         )
-        .eq("id", link_id)
-        .eq("profile_id", profile_id)
-        .execute()
     )
 
+    clear_link_cache()
 
-def delete_link(
-    profile_id,
-    link_id
-):
 
+def delete_link(profile_id, link_id):
     db = get_db()
 
-    (
-        db.table("profile_links")
-        .delete()
-        .eq("id", link_id)
-        .eq("profile_id", profile_id)
-        .execute()
-    )
-
-
-def fetch_links(
-    profile_id,
-    category_id=None,
-    keyword=""
-):
-
-    db = get_db()
-
-    query = (
-        db.table("profile_links")
-        .select("*")
-        .eq("profile_id", profile_id)
-    )
-
-    if category_id is not None:
-
-        query = query.eq(
-            "category_id",
-            category_id
+    execute_with_retry(
+        lambda: (
+            db.table("profile_links")
+            .delete()
+            .eq("id", link_id)
+            .eq("profile_id", profile_id)
+            .execute()
         )
-
-    response = query.execute()
-
-    rows = response.data or []
-
-    # --------------------------------------------------------
-    # 分類名稱 Join
-    #
-    # 家庭收藏量很小，這樣做最簡單、穩定，
-    # 不依賴 PostgREST relation alias。
-    # --------------------------------------------------------
-
-    categories = fetch_categories(
-        profile_id
     )
+
+    clear_link_cache()
+
+
+def fetch_links(profile_id, category_id=None, keyword=""):
+    """
+    所有收藏只從 Supabase 抓一次並快取。
+    分類篩選與文字搜尋全部在 Streamlit 端完成，
+    所以搜尋框每打一個字不會重新打 Supabase API。
+    """
+
+    links = fetch_all_links_cached(profile_id)
+    categories = fetch_categories(profile_id)
 
     category_names = {
         category["id"]: category["name"]
         for category in categories
     }
 
+    keyword_normalized = keyword.strip().casefold()
     result = []
 
-    keyword_normalized = (
-        keyword.strip().casefold()
-    )
-
-    for row in rows:
+    for row in links:
+        if category_id is not None and row.get("category_id") != category_id:
+            continue
 
         item = dict(row)
-
-        category_name = (
-            category_names.get(
-                item.get("category_id"),
-                "未分類"
-            )
+        category_name = category_names.get(
+            item.get("category_id"),
+            "未分類",
         )
-
-        item["category_name"] = (
-            category_name
-        )
+        item["category_name"] = category_name
 
         if keyword_normalized:
-
             haystack = " ".join(
                 [
-                    str(
-                        item.get(
-                            "title",
-                            ""
-                        )
-                        or ""
-                    ),
-                    str(
-                        item.get(
-                            "url",
-                            ""
-                        )
-                        or ""
-                    ),
-                    str(
-                        item.get(
-                            "note",
-                            ""
-                        )
-                        or ""
-                    ),
-                    str(
-                        category_name
-                        or ""
-                    ),
+                    str(item.get("title", "") or ""),
+                    str(item.get("url", "") or ""),
+                    str(item.get("note", "") or ""),
+                    str(category_name or ""),
                 ]
             ).casefold()
 
-            if (
-                keyword_normalized
-                not in haystack
-            ):
+            if keyword_normalized not in haystack:
                 continue
 
-        result.append(
-            item
-        )
-
-    result.sort(
-        key=lambda item: (
-            item.get("id")
-            or 0
-        ),
-        reverse=True
-    )
+        result.append(item)
 
     return result
 
 
 # ============================================================
-# 9. URL
+# 7. URL 功能
 # ============================================================
 
-def normalize_url(url):
 
+def normalize_url(url):
     url = url.strip()
 
     if not url:
         return ""
 
-    if not url.startswith(
-        (
-            "http://",
-            "https://"
-        )
-    ):
-
-        url = (
-            "https://"
-            + url
-        )
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
 
     return url
 
 
 def is_valid_url(url):
-
     try:
-
-        parsed = urlparse(
-            url
-        )
-
+        parsed = urlparse(url)
         return (
-            parsed.scheme
-            in (
-                "http",
-                "https"
-            )
-            and bool(
-                parsed.netloc
-            )
+            parsed.scheme in ("http", "https")
+            and bool(parsed.netloc)
         )
-
     except Exception:
-
         return False
 
 
 # ============================================================
-# 10. 自動取得網頁標題
+# 8. 自動取得網頁標題
 # ============================================================
 
+
 class TitleParser(HTMLParser):
-
     def __init__(self):
-
         super().__init__()
-
         self.in_title = False
         self.title = ""
 
-    def handle_starttag(
-        self,
-        tag,
-        attrs
-    ):
-
+    def handle_starttag(self, tag, attrs):
         if tag.lower() == "title":
             self.in_title = True
 
-    def handle_endtag(
-        self,
-        tag
-    ):
-
+    def handle_endtag(self, tag):
         if tag.lower() == "title":
             self.in_title = False
 
-    def handle_data(
-        self,
-        data
-    ):
-
+    def handle_data(self, data):
         if self.in_title:
             self.title += data
 
 
 def get_page_title(url):
-
     try:
-
         request = Request(
             url,
             headers={
@@ -1227,54 +592,22 @@ def get_page_title(url):
                     "Mobile/15E148 "
                     "Safari/604.1"
                 )
-            }
+            },
         )
 
-        with urlopen(
-            request,
-            timeout=5
-        ) as response:
-
-            html = response.read(
-                300_000
-            )
-
-            encoding = (
-                response
-                .headers
-                .get_content_charset()
-            )
-
-            if not encoding:
-                encoding = "utf-8"
+        with urlopen(request, timeout=5) as response:
+            html = response.read(300_000)
+            encoding = response.headers.get_content_charset() or "utf-8"
 
             try:
-
-                text = html.decode(
-                    encoding,
-                    errors="ignore"
-                )
-
+                text = html.decode(encoding, errors="ignore")
             except Exception:
-
-                text = html.decode(
-                    "utf-8",
-                    errors="ignore"
-                )
+                text = html.decode("utf-8", errors="ignore")
 
         parser = TitleParser()
+        parser.feed(text)
 
-        parser.feed(
-            text
-        )
-
-        title = (
-            parser.title.strip()
-        )
-
-        title = " ".join(
-            title.split()
-        )
+        title = " ".join(parser.title.strip().split())
 
         if title:
             return title
@@ -1286,24 +619,15 @@ def get_page_title(url):
 
 
 def fallback_title(url):
-
     try:
-
-        parsed = urlparse(
-            url
-        )
-
+        parsed = urlparse(url)
         domain = parsed.netloc
 
-        if domain.startswith(
-            "www."
-        ):
-
+        if domain.startswith("www."):
             domain = domain[4:]
 
         if domain:
             return domain
-
     except Exception:
         pass
 
@@ -1311,450 +635,231 @@ def fallback_title(url):
 
 
 # ============================================================
-# 11. URL 中取得 Profile
+# 9. Session State
 # ============================================================
 
-profile_slug = st.query_params.get(
-    "profile",
-    ""
-)
-
-if isinstance(
-    profile_slug,
-    list
-):
-
-    profile_slug = (
-        profile_slug[0]
-        if profile_slug
-        else ""
-    )
-
-profile_slug = (
-    profile_slug
-    .strip()
-    .lower()
-)
-
-profile = get_profile_by_slug(
-    profile_slug
-)
-
-
-# ============================================================
-# 12. 首頁
-#
-# 2 × 2
-# 縮小版卡片
-# ============================================================
-
-if not profile:
-
-    home_html = """
-    <style>
-
-    /* =======================================================
-       背景
-       ======================================================= */
-
-    .stApp {
-        background: #212121 !important;
-    }
-
-
-    /* =======================================================
-       隱藏 Streamlit UI
-       ======================================================= */
-
-    [data-testid="stHeader"] {
-        display: none !important;
-    }
-
-    [data-testid="stToolbar"] {
-        display: none !important;
-    }
-
-    [data-testid="stDecoration"] {
-        display: none !important;
-    }
-
-    #MainMenu {
-        display: none !important;
-    }
-
-    footer {
-        display: none !important;
-    }
-
-
-    /* =======================================================
-       Streamlit 主容器
-       ======================================================= */
-
-    [data-testid="stMainBlockContainer"] {
-
-        padding-top: 0 !important;
-        padding-bottom: 0 !important;
-
-        padding-left: 20px !important;
-        padding-right: 20px !important;
-
-        max-width: 760px !important;
-    }
-
-
-    /* =======================================================
-       首頁
-       ======================================================= */
-
-    .profile-wrapper {
-
-        width: 100%;
-
-        min-height: 100vh;
-
-        display: flex;
-
-        align-items: center;
-        justify-content: center;
-
-        box-sizing: border-box;
-    }
-
-
-    /* =======================================================
-       2 × 2
-       ======================================================= */
-
-    .profile-grid {
-
-        width: 100%;
-
-        display: grid;
-
-        grid-template-columns:
-            repeat(
-                2,
-                minmax(0, 1fr)
-            );
-
-        gap: 14px;
-    }
-
-
-    /* =======================================================
-       卡片
-       ======================================================= */
-
-    .profile-card {
-
-        height: 170px;
-
-        background: #B196E4;
-
-        border-radius: 22px;
-
-        display: flex;
-
-        align-items: center;
-        justify-content: center;
-
-        color: #212121 !important;
-
-        font-size: 27px;
-        font-weight: 700;
-
-        letter-spacing: 0.2px;
-
-        text-decoration: none !important;
-
-        box-shadow:
-            0 8px 22px
-            rgba(0, 0, 0, 0.25);
-
-        transition:
-            transform 0.16s ease,
-            background 0.16s ease,
-            box-shadow 0.16s ease;
-
-        -webkit-tap-highlight-color:
-            transparent;
-
-        user-select: none;
-    }
-
-
-    .profile-card:hover {
-
-        background: #BDA6E8;
-
-        transform:
-            translateY(-3px);
-
-        box-shadow:
-            0 12px 28px
-            rgba(0, 0, 0, 0.32);
-    }
-
-
-    .profile-card:active {
-
-        transform:
-            scale(0.97);
-    }
-
-
-    /* =======================================================
-       手機
-       ======================================================= */
-
-    @media (
-        max-width: 600px
-    ) {
-
-        [data-testid="stMainBlockContainer"] {
-
-            padding-left: 14px !important;
-            padding-right: 14px !important;
-        }
-
-
-        .profile-grid {
-
-            gap: 10px;
-        }
-
-
-        .profile-card {
-
-            height: 135px;
-
-            border-radius: 18px;
-
-            font-size: 20px;
-        }
-
-    }
-
-    </style>
-
-
-    <div class="profile-wrapper">
-
-        <div class="profile-grid">
-
-            <a
-                class="profile-card"
-                href="?profile=honey"
-                target="_self"
-            >Honey</a>
-
-            <a
-                class="profile-card"
-                href="?profile=eirene"
-                target="_self"
-            >Eirene</a>
-
-            <a
-                class="profile-card"
-                href="?profile=tinney"
-                target="_self"
-            >Tinney</a>
-
-            <a
-                class="profile-card"
-                href="?profile=lyris"
-                target="_self"
-            >Lyris</a>
-
-        </div>
-
-    </div>
-    """
-
-    st.html(
-        home_html
-    )
-
-    st.stop()
-
-
-# ============================================================
-# 13. 個人空間
-# ============================================================
-
-profile_id = profile["id"]
-profile_name = profile["name"]
-
-
-# ============================================================
-# 14. 切換使用者時清除暫時狀態
-# ============================================================
-
-if (
-    st.session_state.get(
-        "current_profile_slug"
-    )
-    != profile_slug
-):
-
-    st.session_state[
-        "current_profile_slug"
-    ] = profile_slug
-
-    st.session_state[
-        "editing_link_id"
-    ] = None
-
-    st.session_state[
-        "delete_link_id"
-    ] = None
-
-    st.session_state[
-        "editing_category_id"
-    ] = None
-
-    st.session_state[
-        "delete_category_id"
-    ] = None
-
-    st.session_state[
-        "flash_message"
-    ] = None
-
-
-# ============================================================
-# 15. Session State
-# ============================================================
-
-if "editing_link_id" not in st.session_state:
-
-    st.session_state[
-        "editing_link_id"
-    ] = None
-
-
-if "delete_link_id" not in st.session_state:
-
-    st.session_state[
-        "delete_link_id"
-    ] = None
-
-
-if "editing_category_id" not in st.session_state:
-
-    st.session_state[
-        "editing_category_id"
-    ] = None
-
-
-if "delete_category_id" not in st.session_state:
-
-    st.session_state[
-        "delete_category_id"
-    ] = None
-
-
-if "flash_message" not in st.session_state:
-
-    st.session_state[
-        "flash_message"
-    ] = None
-
-
-# ============================================================
-# 16. 個人頁 Header
-# ============================================================
-
-header_left, header_right = st.columns(
-    [4, 1]
-)
-
-with header_left:
-
-    st.title(
-        f"🔖 {profile_name}"
-    )
-
-
-with header_right:
-
-    if st.button(
-        "← 首頁",
-        use_container_width=True,
-        key=f"home_{profile_slug}"
-    ):
-
-        st.query_params.clear()
-
-        st.rerun()
-
-
-# ============================================================
-# 17. 個人分類
-# ============================================================
-
-categories = fetch_categories(
-    profile_id
-)
-
-cat_dict = {
-
-    category["name"]:
-    category["id"]
-
-    for category
-    in categories
+DEFAULT_STATE = {
+    "editing_link_id": None,
+    "delete_link_id": None,
+    "editing_category_id": None,
+    "delete_category_id": None,
+    "flash_message": None,
 }
 
-cat_names = list(
-    cat_dict.keys()
-)
+for key, value in DEFAULT_STATE.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
 
 # ============================================================
-# 18. 功能切換
+# 10. Eirene 單人版 Theme
 # ============================================================
 
-page_selector_key = (
-    f"page_selector_{profile_slug}"
-)
+APP_CSS = """
+<style>
+
+.stApp {
+    background-color: #212121 !important;
+    color: #F5F5F5 !important;
+}
+
+[data-testid="stHeader"] {
+    background-color: rgba(33, 33, 33, 0.94) !important;
+}
+
+[data-testid="stMainBlockContainer"] {
+    max-width: 760px !important;
+    padding-top: 1.4rem !important;
+    padding-bottom: 2rem !important;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    color: #FFFFFF !important;
+}
+
+.stApp p,
+.stApp label {
+    color: #F2F2F2;
+}
+
+[data-testid="stCaptionContainer"],
+[data-testid="stCaptionContainer"] p {
+    color: #AFAFAF !important;
+}
+
+/* Input */
+[data-baseweb="input"] > div,
+[data-baseweb="textarea"],
+[data-baseweb="select"] > div {
+    background-color: #292930 !important;
+    border-color: #474750 !important;
+    border-radius: 12px !important;
+}
+
+[data-baseweb="input"] input,
+[data-baseweb="textarea"] textarea {
+    color: #FFFFFF !important;
+    background-color: transparent !important;
+}
+
+[data-baseweb="select"] span {
+    color: #FFFFFF !important;
+}
+
+input::placeholder,
+textarea::placeholder {
+    color: #9A9AA5 !important;
+    opacity: 1 !important;
+}
+
+/* Form */
+[data-testid="stForm"] {
+    border-color: #44444D !important;
+    border-radius: 14px !important;
+}
+
+/* 收藏 / 分類卡片 */
+[data-testid="stVerticalBlockBorderWrapper"] {
+    background-color: #28282D !important;
+    border-color: #424249 !important;
+    border-radius: 16px !important;
+}
+
+/* 一般按鈕 */
+.stButton > button {
+    background-color: #2B2B31 !important;
+    color: #FFFFFF !important;
+    border: 1px solid #50505A !important;
+    border-radius: 11px !important;
+}
+
+.stButton > button:hover {
+    background-color: #36363E !important;
+    color: #FFFFFF !important;
+    border-color: #B196E4 !important;
+}
+
+/* 紫色 Primary / Form Submit */
+button[kind="primary"],
+[data-testid="stFormSubmitButton"] button {
+    background-color: #B196E4 !important;
+    color: #212121 !important;
+    border: 1px solid #B196E4 !important;
+    border-radius: 11px !important;
+    font-weight: 700 !important;
+}
+
+button[kind="primary"]:hover,
+[data-testid="stFormSubmitButton"] button:hover {
+    background-color: #BDA6E8 !important;
+    color: #212121 !important;
+    border-color: #BDA6E8 !important;
+}
+
+/* 開啟連結 */
+[data-testid="stLinkButton"] a {
+    background-color: #B196E4 !important;
+    color: #212121 !important;
+    border: 1px solid #B196E4 !important;
+    border-radius: 11px !important;
+    font-weight: 700 !important;
+}
+
+[data-testid="stLinkButton"] a:hover {
+    background-color: #BDA6E8 !important;
+    color: #212121 !important;
+    border-color: #BDA6E8 !important;
+}
+
+/* Segmented control */
+[data-testid="stSegmentedControl"] button {
+    color: #E5E5E5 !important;
+    border-color: #4B4B55 !important;
+}
+
+[data-testid="stSegmentedControl"] button[aria-pressed="true"] {
+    background-color: #B196E4 !important;
+    color: #212121 !important;
+    border-color: #B196E4 !important;
+    font-weight: 700 !important;
+}
+
+hr {
+    border-color: #3D3D45 !important;
+}
+
+[data-testid="stAlert"] {
+    border-radius: 13px !important;
+}
+
+@media (max-width: 600px) {
+    [data-testid="stMainBlockContainer"] {
+        padding-left: 14px !important;
+        padding-right: 14px !important;
+        padding-top: 1rem !important;
+    }
+}
+
+</style>
+"""
+
+st.html(APP_CSS)
+
+
+# ============================================================
+# 11. Header
+# ============================================================
+
+st.title(f"{PROFILE_ICON} {PROFILE_NAME}")
+
+
+# ============================================================
+# 12. 取得分類
+#
+# 第一次會讀 Supabase；之後 rerun 使用 cache。
+# ============================================================
+
+try:
+    categories = fetch_categories(PROFILE_ID)
+except Exception as exc:
+    show_connection_error(exc)
+
+cat_dict = {
+    category["name"]: category["id"]
+    for category in categories
+}
+
+cat_names = list(cat_dict.keys())
+
+
+# ============================================================
+# 13. 功能切換
+# ============================================================
 
 active_page = st.segmented_control(
     "功能",
     options=[
         PAGE_ADD,
         PAGE_LIBRARY,
-        PAGE_CATEGORIES
+        PAGE_CATEGORIES,
     ],
     default=PAGE_ADD,
     selection_mode="single",
-    key=page_selector_key,
-    label_visibility="collapsed"
+    key="page_selector_eirene",
+    label_visibility="collapsed",
 )
 
 if not active_page:
-
     active_page = PAGE_ADD
 
 
 # ============================================================
-# 19. 一次性訊息
+# 14. 一次性訊息
 # ============================================================
 
-if st.session_state[
-    "flash_message"
-]:
-
-    st.success(
-        st.session_state[
-            "flash_message"
-        ]
-    )
-
-    st.session_state[
-        "flash_message"
-    ] = None
+if st.session_state["flash_message"]:
+    st.success(st.session_state["flash_message"])
+    st.session_state["flash_message"] = None
 
 
 # ============================================================
@@ -1762,98 +867,67 @@ if st.session_state[
 # ============================================================
 
 if active_page == PAGE_ADD:
-
-    st.markdown(
-        "### 快速收藏"
-    )
+    st.markdown("### 快速收藏")
 
     with st.form(
-        f"add_link_form_{profile_slug}",
-        clear_on_submit=True
+        "add_link_form_eirene",
+        clear_on_submit=True,
     ):
-
         link_title = st.text_input(
             "標題",
-            placeholder=(
-                "可以不填，系統會自動取得"
-            )
+            placeholder="可以不填，系統會自動取得",
         )
 
         link_url = st.text_input(
             "Link",
-            placeholder="https://..."
+            placeholder="https://...",
         )
 
         selected_cat_name = st.selectbox(
             "分類",
-            cat_names
+            cat_names,
         )
 
         submitted = st.form_submit_button(
             "💾 儲存收藏",
             type="primary",
-            use_container_width=True
+            use_container_width=True,
         )
 
         if submitted:
-
-            url = normalize_url(
-                link_url
-            )
+            url = normalize_url(link_url)
 
             if not url:
+                st.error("請輸入網址。")
 
-                st.error(
-                    "請輸入網址。"
-                )
-
-            elif not is_valid_url(
-                url
-            ):
-
-                st.error(
-                    "網址格式似乎不正確。"
-                )
+            elif not is_valid_url(url):
+                st.error("網址格式似乎不正確。")
 
             else:
-
-                title = (
-                    link_title.strip()
-                )
-
-                # --------------------------------------------
-                # 沒標題 → 自動取得
-                # --------------------------------------------
+                title = link_title.strip()
 
                 if not title:
-
-                    with st.spinner(
-                        "正在取得網頁標題..."
-                    ):
-
-                        title = get_page_title(
-                            url
-                        )
+                    with st.spinner("正在取得網頁標題..."):
+                        title = get_page_title(url)
 
                     if not title:
+                        title = fallback_title(url)
 
-                        title = fallback_title(
-                            url
-                        )
+                try:
+                    add_link(
+                        profile_id=PROFILE_ID,
+                        title=title,
+                        url=url,
+                        category_id=cat_dict[selected_cat_name],
+                        note="",
+                    )
 
-                add_link(
-                    profile_id=profile_id,
-                    title=title,
-                    url=url,
-                    category_id=cat_dict[
-                        selected_cat_name
-                    ],
-                    note=""
-                )
+                    st.success(f"✅ 已收藏：{title}")
 
-                st.success(
-                    f"✅ 已收藏：{title}"
-                )
+                except Exception as exc:
+                    st.error("收藏儲存失敗，請稍後再試。")
+                    with st.expander("技術資訊"):
+                        st.code(str(exc))
 
 
 # ============================================================
@@ -1861,154 +935,75 @@ if active_page == PAGE_ADD:
 # ============================================================
 
 elif active_page == PAGE_LIBRARY:
-
-    st.markdown(
-        "### 📚 收藏庫"
-    )
-
-    # --------------------------------------------------------
-    # 搜尋
-    # --------------------------------------------------------
+    st.markdown("### 📚 收藏庫")
 
     search_keyword = st.text_input(
         "搜尋收藏",
-        placeholder=(
-            "🔍 搜尋標題、網址、分類..."
-        ),
-        key=(
-            f"library_search_{profile_slug}"
-        )
+        placeholder="🔍 搜尋標題、網址、分類...",
+        key="library_search_eirene",
     )
 
-    # --------------------------------------------------------
-    # 分類篩選
-    # --------------------------------------------------------
+    library_options = ["全部"] + cat_names
+    library_filter_key = "library_filter_eirene"
 
-    library_options = (
-        ["全部"]
-        + cat_names
-    )
-
-    library_filter_key = (
-        f"library_filter_{profile_slug}"
-    )
-
-    if (
-        library_filter_key
-        in st.session_state
-    ):
-
-        if (
-            st.session_state[
-                library_filter_key
-            ]
-            not in library_options
-        ):
-
-            st.session_state[
-                library_filter_key
-            ] = "全部"
+    if library_filter_key in st.session_state:
+        if st.session_state[library_filter_key] not in library_options:
+            st.session_state[library_filter_key] = "全部"
 
     filter_cat = st.selectbox(
         "分類",
         library_options,
-        key=library_filter_key
+        key=library_filter_key,
     )
 
     current_cat_id = (
         None
         if filter_cat == "全部"
-        else cat_dict[
-            filter_cat
-        ]
+        else cat_dict[filter_cat]
     )
 
-    links = fetch_links(
-        profile_id=profile_id,
-        category_id=current_cat_id,
-        keyword=search_keyword
-    )
+    try:
+        links = fetch_links(
+            profile_id=PROFILE_ID,
+            category_id=current_cat_id,
+            keyword=search_keyword,
+        )
+    except Exception as exc:
+        show_connection_error(exc)
 
-    st.caption(
-        f"目前共有 {len(links)} 筆收藏"
-    )
+    st.caption(f"目前共有 {len(links)} 筆收藏")
 
     if not links:
-
-        st.info(
-            "目前沒有符合條件的收藏。"
-        )
-
-    # --------------------------------------------------------
-    # 收藏卡片
-    # --------------------------------------------------------
+        st.info("目前沒有符合條件的收藏。")
 
     for item in links:
-
         link_id = item["id"]
 
-        with st.container(
-            border=True
-        ):
-
-            # =================================================
-            # 編輯收藏
-            # =================================================
-
-            if (
-                st.session_state[
-                    "editing_link_id"
-                ]
-                == link_id
-            ):
-
-                st.markdown(
-                    "#### ✏️ 編輯收藏"
-                )
+        with st.container(border=True):
+            # ------------------------------------------------
+            # 編輯模式
+            # ------------------------------------------------
+            if st.session_state["editing_link_id"] == link_id:
+                st.markdown("#### ✏️ 編輯收藏")
 
                 edit_title = st.text_input(
                     "標題",
                     value=item["title"],
-                    key=(
-                        f"edit_title_"
-                        f"{profile_slug}_"
-                        f"{link_id}"
-                    )
+                    key=f"edit_title_{link_id}",
                 )
 
                 edit_url = st.text_input(
                     "Link",
                     value=item["url"],
-                    key=(
-                        f"edit_url_"
-                        f"{profile_slug}_"
-                        f"{link_id}"
-                    )
+                    key=f"edit_url_{link_id}",
                 )
 
                 try:
-
+                    current_index = cat_names.index(item["category_name"])
+                except (ValueError, TypeError):
                     current_index = (
-                        cat_names.index(
-                            item[
-                                "category_name"
-                            ]
-                        )
-                    )
-
-                except (
-                    ValueError,
-                    TypeError
-                ):
-
-                    current_index = (
-                        cat_names.index(
-                            "未分類"
-                        )
-
-                        if "未分類"
-                        in cat_names
-
+                        cat_names.index("未分類")
+                        if "未分類" in cat_names
                         else 0
                     )
 
@@ -2016,684 +1011,326 @@ elif active_page == PAGE_LIBRARY:
                     "分類",
                     cat_names,
                     index=current_index,
-                    key=(
-                        f"edit_category_"
-                        f"{profile_slug}_"
-                        f"{link_id}"
-                    )
+                    key=f"edit_category_{link_id}",
                 )
 
                 edit_note = st.text_area(
                     "備註",
-                    value=(
-                        item["note"]
-                        or ""
-                    ),
+                    value=item.get("note") or "",
                     placeholder="可選填",
-                    key=(
-                        f"edit_note_"
-                        f"{profile_slug}_"
-                        f"{link_id}"
-                    )
+                    key=f"edit_note_{link_id}",
                 )
 
-                (
-                    col_save,
-                    col_cancel
-                ) = st.columns(2)
-
-                # --------------------------------------------
-                # 儲存修改
-                # --------------------------------------------
+                col_save, col_cancel = st.columns(2)
 
                 with col_save:
-
                     if st.button(
                         "💾 儲存修改",
-                        key=(
-                            f"save_"
-                            f"{profile_slug}_"
-                            f"{link_id}"
-                        ),
+                        key=f"save_{link_id}",
                         type="primary",
-                        use_container_width=True
+                        use_container_width=True,
                     ):
-
-                        new_url = normalize_url(
-                            edit_url
-                        )
+                        new_url = normalize_url(edit_url)
 
                         if not edit_title.strip():
+                            st.error("標題不能為空白。")
 
-                            st.error(
-                                "標題不能為空白。"
-                            )
-
-                        elif not is_valid_url(
-                            new_url
-                        ):
-
-                            st.error(
-                                "網址格式不正確。"
-                            )
+                        elif not is_valid_url(new_url):
+                            st.error("網址格式不正確。")
 
                         else:
+                            try:
+                                update_link(
+                                    profile_id=PROFILE_ID,
+                                    link_id=link_id,
+                                    title=edit_title,
+                                    url=new_url,
+                                    category_id=cat_dict[edit_category],
+                                    note=edit_note,
+                                )
 
-                            update_link(
-                                profile_id=profile_id,
-                                link_id=link_id,
-                                title=edit_title,
-                                url=new_url,
-                                category_id=cat_dict[
-                                    edit_category
-                                ],
-                                note=edit_note
-                            )
+                                st.session_state["editing_link_id"] = None
+                                st.session_state["flash_message"] = "✅ 收藏已更新。"
+                                st.rerun()
 
-                            st.session_state[
-                                "editing_link_id"
-                            ] = None
-
-                            st.session_state[
-                                "flash_message"
-                            ] = "✅ 收藏已更新。"
-
-                            st.rerun()
-
-                # --------------------------------------------
-                # 取消
-                # --------------------------------------------
+                            except Exception as exc:
+                                st.error("更新失敗，請稍後再試。")
+                                with st.expander("技術資訊"):
+                                    st.code(str(exc))
 
                 with col_cancel:
-
                     if st.button(
                         "取消",
-                        key=(
-                            f"cancel_edit_"
-                            f"{profile_slug}_"
-                            f"{link_id}"
-                        ),
-                        use_container_width=True
+                        key=f"cancel_edit_{link_id}",
+                        use_container_width=True,
                     ):
-
-                        st.session_state[
-                            "editing_link_id"
-                        ] = None
-
+                        st.session_state["editing_link_id"] = None
                         st.rerun()
 
-
-            # =================================================
-            # 一般收藏
-            # =================================================
-
+            # ------------------------------------------------
+            # 一般模式
+            # ------------------------------------------------
             else:
+                st.markdown(f"### {item['title']}")
 
-                st.markdown(
-                    f"### {item['title']}"
-                )
-
-                category_name = (
-                    item["category_name"]
-                    or "未分類"
-                )
+                category_name = item.get("category_name") or "未分類"
 
                 st.caption(
-                    f"🏷️ {category_name}"
-                    f"　·　"
-                    f"🕒 {item['created_at']}"
+                    f"🏷️ {category_name}　·　🕒 {item.get('created_at', '')}"
                 )
 
-                if item["note"]:
+                if item.get("note"):
+                    st.write(item["note"])
 
-                    st.write(
-                        item["note"]
-                    )
-
-                (
-                    col_open,
-                    col_edit,
-                    col_delete
-                ) = st.columns(
-                    [3, 1, 1]
-                )
-
-                # --------------------------------------------
-                # 開啟
-                # --------------------------------------------
+                col_open, col_edit, col_delete = st.columns([3, 1, 1])
 
                 with col_open:
-
                     st.link_button(
                         "🔗 開啟連結",
                         item["url"],
-                        use_container_width=True
+                        use_container_width=True,
                     )
-
-                # --------------------------------------------
-                # 編輯
-                # --------------------------------------------
 
                 with col_edit:
-
                     if st.button(
                         "✏️",
-                        key=(
-                            f"edit_"
-                            f"{profile_slug}_"
-                            f"{link_id}"
-                        ),
+                        key=f"edit_{link_id}",
                         help="編輯收藏",
-                        use_container_width=True
+                        use_container_width=True,
                     ):
-
-                        st.session_state[
-                            "editing_link_id"
-                        ] = link_id
-
-                        st.session_state[
-                            "delete_link_id"
-                        ] = None
-
+                        st.session_state["editing_link_id"] = link_id
+                        st.session_state["delete_link_id"] = None
                         st.rerun()
-
-                # --------------------------------------------
-                # 刪除
-                # --------------------------------------------
 
                 with col_delete:
-
                     if st.button(
                         "🗑️",
-                        key=(
-                            f"delete_"
-                            f"{profile_slug}_"
-                            f"{link_id}"
-                        ),
+                        key=f"delete_{link_id}",
                         help="刪除收藏",
-                        use_container_width=True
+                        use_container_width=True,
                     ):
-
-                        st.session_state[
-                            "delete_link_id"
-                        ] = link_id
-
-                        st.session_state[
-                            "editing_link_id"
-                        ] = None
-
+                        st.session_state["delete_link_id"] = link_id
+                        st.session_state["editing_link_id"] = None
                         st.rerun()
 
-                # =================================================
-                # 刪除確認
-                # =================================================
+                if st.session_state["delete_link_id"] == link_id:
+                    st.warning(f"確定要刪除「{item['title']}」嗎？")
 
-                if (
-                    st.session_state[
-                        "delete_link_id"
-                    ]
-                    == link_id
-                ):
-
-                    st.warning(
-                        f"確定要刪除"
-                        f"「{item['title']}」嗎？"
-                    )
-
-                    (
-                        confirm_col,
-                        cancel_col
-                    ) = st.columns(2)
+                    confirm_col, cancel_col = st.columns(2)
 
                     with confirm_col:
-
                         if st.button(
                             "確定刪除",
-                            key=(
-                                f"confirm_delete_"
-                                f"{profile_slug}_"
-                                f"{link_id}"
-                            ),
+                            key=f"confirm_delete_{link_id}",
                             type="primary",
-                            use_container_width=True
+                            use_container_width=True,
                         ):
+                            try:
+                                delete_link(PROFILE_ID, link_id)
+                                st.session_state["delete_link_id"] = None
+                                st.session_state["flash_message"] = "🗑️ 收藏已刪除。"
+                                st.rerun()
 
-                            delete_link(
-                                profile_id,
-                                link_id
-                            )
-
-                            st.session_state[
-                                "delete_link_id"
-                            ] = None
-
-                            st.session_state[
-                                "flash_message"
-                            ] = "🗑️ 收藏已刪除。"
-
-                            st.rerun()
+                            except Exception as exc:
+                                st.error("刪除失敗，請稍後再試。")
+                                with st.expander("技術資訊"):
+                                    st.code(str(exc))
 
                     with cancel_col:
-
                         if st.button(
                             "取消",
-                            key=(
-                                f"cancel_delete_"
-                                f"{profile_slug}_"
-                                f"{link_id}"
-                            ),
-                            use_container_width=True
+                            key=f"cancel_delete_{link_id}",
+                            use_container_width=True,
                         ):
-
-                            st.session_state[
-                                "delete_link_id"
-                            ] = None
-
+                            st.session_state["delete_link_id"] = None
                             st.rerun()
 
 
 # ============================================================
-# PAGE 3：分類
+# PAGE 3：分類管理
 # ============================================================
 
 elif active_page == PAGE_CATEGORIES:
+    st.markdown("### 🏷️ 分類管理")
+    st.caption("新增、重新命名或刪除你的收藏分類。")
 
-    st.markdown(
-        "### 🏷️ 分類管理"
-    )
-
-    st.caption(
-        "新增、重新命名或刪除你的收藏分類。"
-    )
-
-    # ========================================================
-    # 新增分類
-    # ========================================================
-
-    st.markdown(
-        "#### ＋ 新增分類"
-    )
+    st.markdown("#### ＋ 新增分類")
 
     with st.form(
-        f"add_category_form_{profile_slug}",
-        clear_on_submit=True
+        "add_category_form_eirene",
+        clear_on_submit=True,
     ):
-
         new_cat_name = st.text_input(
             "分類名稱",
-            placeholder=(
-                "例如：料理、投資、AI 工具"
-            )
+            placeholder="例如：料理、投資、AI 工具",
         )
 
-        add_category_submitted = (
-            st.form_submit_button(
-                "＋ 新增分類",
-                type="primary",
-                use_container_width=True
-            )
+        add_category_submitted = st.form_submit_button(
+            "＋ 新增分類",
+            type="primary",
+            use_container_width=True,
         )
 
         if add_category_submitted:
-
-            category_name = (
-                new_cat_name.strip()
-            )
+            category_name = new_cat_name.strip()
 
             if not category_name:
+                st.warning("請輸入分類名稱。")
 
-                st.warning(
-                    "請輸入分類名稱。"
+            elif add_category(PROFILE_ID, category_name):
+                st.session_state["flash_message"] = (
+                    f"✅ 已新增分類「{category_name}」。"
                 )
-
-            elif add_category(
-                profile_id,
-                category_name
-            ):
-
-                st.session_state[
-                    "flash_message"
-                ] = (
-                    f"✅ 已新增分類"
-                    f"「{category_name}」。"
-                )
-
                 st.rerun()
 
             else:
-
-                st.warning(
-                    "這個分類已經存在。"
-                )
+                st.warning("這個分類已經存在，或新增失敗。")
 
     st.divider()
+    st.markdown("#### 我的分類")
 
-    # ========================================================
-    # 我的分類
-    # ========================================================
-
-    st.markdown(
-        "#### 我的分類"
-    )
-
-    category_list = (
-        fetch_categories_with_counts(
-            profile_id
-        )
-    )
+    try:
+        category_list = fetch_categories_with_counts(PROFILE_ID)
+    except Exception as exc:
+        show_connection_error(exc)
 
     for category in category_list:
+        category_id = category["id"]
+        category_name = category["name"]
+        link_count = category["link_count"]
 
-        category_id = (
-            category["id"]
-        )
-
-        category_name = (
-            category["name"]
-        )
-
-        link_count = (
-            category["link_count"]
-        )
-
-        with st.container(
-            border=True
-        ):
-
-            # =================================================
+        with st.container(border=True):
+            # ------------------------------------------------
             # 未分類
-            # =================================================
-
+            # ------------------------------------------------
             if category_name == "未分類":
-
-                (
-                    col_info,
-                    col_lock
-                ) = st.columns(
-                    [5, 1]
-                )
+                col_info, col_lock = st.columns([5, 1])
 
                 with col_info:
-
-                    st.markdown(
-                        f"**📦 {category_name}**"
-                    )
-
-                    st.caption(
-                        f"{link_count} 筆收藏"
-                    )
+                    st.markdown(f"**📦 {category_name}**")
+                    st.caption(f"{link_count} 筆收藏")
 
                 with col_lock:
+                    st.markdown("🔒")
 
-                    st.markdown(
-                        "🔒"
-                    )
-
-
-            # =================================================
+            # ------------------------------------------------
             # 編輯分類
-            # =================================================
-
-            elif (
-                st.session_state[
-                    "editing_category_id"
-                ]
-                == category_id
-            ):
-
-                st.markdown(
-                    f"**✏️ 編輯「{category_name}」**"
-                )
+            # ------------------------------------------------
+            elif st.session_state["editing_category_id"] == category_id:
+                st.markdown(f"**✏️ 編輯「{category_name}」**")
 
                 new_name = st.text_input(
                     "新的分類名稱",
                     value=category_name,
-                    key=(
-                        f"rename_category_"
-                        f"{profile_slug}_"
-                        f"{category_id}"
-                    )
+                    key=f"rename_category_{category_id}",
                 )
 
-                (
-                    col_save,
-                    col_cancel
-                ) = st.columns(2)
-
-                # --------------------------------------------
-                # 儲存
-                # --------------------------------------------
+                col_save, col_cancel = st.columns(2)
 
                 with col_save:
-
                     if st.button(
                         "儲存",
                         type="primary",
                         use_container_width=True,
-                        key=(
-                            f"save_category_"
-                            f"{profile_slug}_"
-                            f"{category_id}"
-                        )
+                        key=f"save_category_{category_id}",
                     ):
-
-                        success, error = (
-                            rename_category(
-                                profile_id,
-                                category_id,
-                                new_name
-                            )
+                        success, error = rename_category(
+                            PROFILE_ID,
+                            category_id,
+                            new_name,
                         )
 
                         if success:
-
-                            st.session_state[
-                                "editing_category_id"
-                            ] = None
-
-                            st.session_state[
-                                "flash_message"
-                            ] = (
-                                "✅ 分類名稱已更新。"
-                            )
-
+                            st.session_state["editing_category_id"] = None
+                            st.session_state["flash_message"] = "✅ 分類名稱已更新。"
                             st.rerun()
-
                         else:
-
-                            st.error(
-                                error
-                            )
-
-                # --------------------------------------------
-                # 取消
-                # --------------------------------------------
+                            st.error(error)
 
                 with col_cancel:
-
                     if st.button(
                         "取消",
                         use_container_width=True,
-                        key=(
-                            f"cancel_category_edit_"
-                            f"{profile_slug}_"
-                            f"{category_id}"
-                        )
+                        key=f"cancel_category_edit_{category_id}",
                     ):
-
-                        st.session_state[
-                            "editing_category_id"
-                        ] = None
-
+                        st.session_state["editing_category_id"] = None
                         st.rerun()
 
-
-            # =================================================
+            # ------------------------------------------------
             # 一般分類
-            # =================================================
-
+            # ------------------------------------------------
             else:
-
-                (
-                    col_info,
-                    col_edit,
-                    col_delete
-                ) = st.columns(
-                    [5, 1, 1]
-                )
+                col_info, col_edit, col_delete = st.columns([5, 1, 1])
 
                 with col_info:
-
-                    st.markdown(
-                        f"**🏷️ {category_name}**"
-                    )
-
-                    st.caption(
-                        f"{link_count} 筆收藏"
-                    )
-
-                # --------------------------------------------
-                # 編輯
-                # --------------------------------------------
+                    st.markdown(f"**🏷️ {category_name}**")
+                    st.caption(f"{link_count} 筆收藏")
 
                 with col_edit:
-
                     if st.button(
                         "✏️",
-                        key=(
-                            f"edit_category_"
-                            f"{profile_slug}_"
-                            f"{category_id}"
-                        ),
+                        key=f"edit_category_{category_id}",
                         help="重新命名",
-                        use_container_width=True
+                        use_container_width=True,
                     ):
-
-                        st.session_state[
-                            "editing_category_id"
-                        ] = category_id
-
-                        st.session_state[
-                            "delete_category_id"
-                        ] = None
-
+                        st.session_state["editing_category_id"] = category_id
+                        st.session_state["delete_category_id"] = None
                         st.rerun()
-
-                # --------------------------------------------
-                # 刪除
-                # --------------------------------------------
 
                 with col_delete:
-
                     if st.button(
                         "🗑️",
-                        key=(
-                            f"delete_category_"
-                            f"{profile_slug}_"
-                            f"{category_id}"
-                        ),
+                        key=f"delete_category_{category_id}",
                         help="刪除分類",
-                        use_container_width=True
+                        use_container_width=True,
                     ):
-
-                        st.session_state[
-                            "delete_category_id"
-                        ] = category_id
-
-                        st.session_state[
-                            "editing_category_id"
-                        ] = None
-
+                        st.session_state["delete_category_id"] = category_id
+                        st.session_state["editing_category_id"] = None
                         st.rerun()
 
-                # =================================================
-                # 刪除分類確認
-                # =================================================
-
-                if (
-                    st.session_state[
-                        "delete_category_id"
-                    ]
-                    == category_id
-                ):
-
+                if st.session_state["delete_category_id"] == category_id:
                     if link_count > 0:
-
                         st.warning(
-                            f"確定要刪除"
-                            f"「{category_name}」嗎？"
-                            f"\n\n"
-                            f"其中的 {link_count} 筆收藏"
-                            f"會移到「未分類」。"
+                            f"確定要刪除「{category_name}」嗎？\n\n"
+                            f"其中的 {link_count} 筆收藏會移到「未分類」。"
                         )
-
                     else:
+                        st.warning(f"確定要刪除「{category_name}」嗎？")
 
-                        st.warning(
-                            f"確定要刪除"
-                            f"「{category_name}」嗎？"
-                        )
-
-                    (
-                        col_confirm,
-                        col_cancel
-                    ) = st.columns(2)
-
-                    # ----------------------------------------
-                    # 確定刪除
-                    # ----------------------------------------
+                    col_confirm, col_cancel = st.columns(2)
 
                     with col_confirm:
-
                         if st.button(
                             "確定刪除",
                             type="primary",
                             use_container_width=True,
-                            key=(
-                                f"confirm_category_"
-                                f"{profile_slug}_"
-                                f"{category_id}"
-                            )
+                            key=f"confirm_category_{category_id}",
                         ):
-
-                            success = delete_category(
-                                profile_id,
-                                category_id
-                            )
-
-                            st.session_state[
-                                "delete_category_id"
-                            ] = None
-
-                            if success:
-
-                                st.session_state[
-                                    "flash_message"
-                                ] = (
-                                    f"🗑️ 已刪除分類"
-                                    f"「{category_name}」。"
+                            try:
+                                success = delete_category(
+                                    PROFILE_ID,
+                                    category_id,
                                 )
 
-                            st.rerun()
+                                st.session_state["delete_category_id"] = None
 
-                    # ----------------------------------------
-                    # 取消
-                    # ----------------------------------------
+                                if success:
+                                    st.session_state["flash_message"] = (
+                                        f"🗑️ 已刪除分類「{category_name}」。"
+                                    )
+
+                                st.rerun()
+
+                            except Exception as exc:
+                                st.error("刪除分類失敗，請稍後再試。")
+                                with st.expander("技術資訊"):
+                                    st.code(str(exc))
 
                     with col_cancel:
-
                         if st.button(
                             "取消",
                             use_container_width=True,
-                            key=(
-                                f"cancel_category_"
-                                f"{profile_slug}_"
-                                f"{category_id}"
-                            )
+                            key=f"cancel_category_{category_id}",
                         ):
-
-                            st.session_state[
-                                "delete_category_id"
-                            ] = None
-
+                            st.session_state["delete_category_id"] = None
                             st.rerun()
