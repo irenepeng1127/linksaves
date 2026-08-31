@@ -20,8 +20,8 @@ st.set_page_config(
 )
 
 PAGE_ADD = "🎯 新增收藏"
-PAGE_LIBRARY = "📚 收藏庫"
-PAGE_CATEGORIES = "🎞 分類"
+PAGE_LIBRARY = "📚 收藏倉庫"
+PAGE_CATEGORIES = "🎞 分類管理"
 
 PROFILE_SLUG = "eirene"
 PROFILE_NAME = "Eirene 🎀"
