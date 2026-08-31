@@ -781,6 +781,20 @@ button[kind="primary"],
     font-weight: 700 !important;
 }
 
+
+/* 強制裡面的文字也黑色 */
+button[kind="primary"] *,
+button[kind="primary"] p,
+button[kind="primary"] span,
+[data-testid="stFormSubmitButton"] button *,
+[data-testid="stFormSubmitButton"] button p,
+[data-testid="stFormSubmitButton"] button span {
+    color: #212121 !important;
+    -webkit-text-fill-color: #212121 !important;
+}
+
+
+/* Hover */
 button[kind="primary"]:hover,
 [data-testid="stFormSubmitButton"] button:hover {
     background-color: #BDA6E8 !important;
@@ -788,33 +802,14 @@ button[kind="primary"]:hover,
     border-color: #BDA6E8 !important;
 }
 
-/* 開啟連結 */
-[data-testid="stLinkButton"] a {
-    background-color: #B196E4 !important;
-    color: #212121 !important;
-    border: 1px solid #B196E4 !important;
-    border-radius: 11px !important;
-    font-weight: 700 !important;
-}
 
-/* 強制按鈕內所有文字也是黑色 */
-[data-testid="stLinkButton"] a *,
-[data-testid="stLinkButton"] a p,
-[data-testid="stLinkButton"] a span {
-    color: #212121 !important;
-    -webkit-text-fill-color: #212121 !important;
-}
-
-/* 滑鼠移上去 */
-[data-testid="stLinkButton"] a:hover {
-    background-color: #BDA6E8 !important;
-    color: #212121 !important;
-    border-color: #BDA6E8 !important;
-}
-
-[data-testid="stLinkButton"] a:hover *,
-[data-testid="stLinkButton"] a:hover p,
-[data-testid="stLinkButton"] a:hover span {
+/* Hover 時裡面的文字也黑色 */
+button[kind="primary"]:hover *,
+button[kind="primary"]:hover p,
+button[kind="primary"]:hover span,
+[data-testid="stFormSubmitButton"] button:hover *,
+[data-testid="stFormSubmitButton"] button:hover p,
+[data-testid="stFormSubmitButton"] button:hover span {
     color: #212121 !important;
     -webkit-text-fill-color: #212121 !important;
 }
