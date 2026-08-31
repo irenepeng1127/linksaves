@@ -668,9 +668,14 @@ APP_CSS = """
 }
 
 [data-testid="stMainBlockContainer"] {
-    max-width: 760px !important;
-    padding-top: 1.4rem !important;
+    width: min(100%, 720px) !important;
+    max-width: 720px !important;
+    margin-left: auto !important;
+    margin-right: auto !important;
+    padding-top: 1.25rem !important;
     padding-bottom: 2rem !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
 }
 
 h1, h2, h3, h4, h5, h6 {
@@ -771,8 +776,23 @@ button[kind="primary"]:hover,
     border-color: #BDA6E8 !important;
 }
 
-/* Segmented control */
+/* Segmented control：固定跟下方表單同寬，三格平均 */
+[data-testid="stSegmentedControl"] {
+    width: 100% !important;
+}
+
+[data-testid="stSegmentedControl"] > div {
+    width: 100% !important;
+}
+
+[data-testid="stSegmentedControl"] [role="radiogroup"] {
+    display: flex !important;
+    width: 100% !important;
+}
+
 [data-testid="stSegmentedControl"] button {
+    flex: 1 1 0 !important;
+    justify-content: center !important;
     color: #E5E5E5 !important;
     border-color: #4B4B55 !important;
 }
@@ -792,11 +812,21 @@ hr {
     border-radius: 13px !important;
 }
 
-@media (max-width: 600px) {
+@media (max-width: 760px) {
     [data-testid="stMainBlockContainer"] {
+        width: 100% !important;
+        max-width: 100% !important;
         padding-left: 14px !important;
         padding-right: 14px !important;
         padding-top: 1rem !important;
+    }
+}
+
+@media (max-width: 480px) {
+    [data-testid="stSegmentedControl"] button {
+        font-size: 0.88rem !important;
+        padding-left: 0.4rem !important;
+        padding-right: 0.4rem !important;
     }
 }
 
@@ -847,6 +877,7 @@ active_page = st.segmented_control(
     selection_mode="single",
     key="page_selector_eirene",
     label_visibility="collapsed",
+    width="stretch",
 )
 
 if not active_page:
