@@ -1,10 +1,12 @@
 import sqlite3
 from datetime import datetime
 from html.parser import HTMLParser
+from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import streamlit as st
+from supabase import Client, create_client
 
 
 # ============================================================
@@ -17,8 +19,6 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="collapsed",
 )
-
-DB_NAME = "link_vault.db"
 
 PAGE_ADD = "➕ 新增收藏"
 PAGE_LIBRARY = "📚 收藏庫"
@@ -38,26 +38,270 @@ PROFILES = [
 
 
 # ============================================================
-# 3. Database
+# 3. Supabase 連線
+#
+# Streamlit Cloud → App settings → Secrets：
+#
+# [supabase]
+# url = "https://xxxx.supabase.co"
+# key = "sb_secret_xxxxxxxxx"
+#
+# 不要把 Secret Key 直接寫進程式或 GitHub。
 # ============================================================
 
-def get_db():
-    conn = sqlite3.connect(
-        DB_NAME,
-        check_same_thread=False
+@st.cache_resource
+def get_db() -> Client:
+
+    try:
+        supabase_url = st.secrets["supabase"]["url"]
+        supabase_key = st.secrets["supabase"]["key"]
+
+    except Exception:
+
+        st.error(
+            "尚未設定 Supabase 連線。\n\n"
+            "請到 Streamlit App settings → Secrets 加入：\n\n"
+            '[supabase]\n'
+            'url = "https://你的專案.supabase.co"\n'
+            'key = "sb_secret_..."'
+        )
+
+        st.stop()
+
+    return create_client(
+        supabase_url,
+        supabase_key
     )
 
-    conn.row_factory = sqlite3.Row
 
-    conn.execute(
-        "PRAGMA foreign_keys = ON"
+# ============================================================
+# 4. Supabase 小工具
+# ============================================================
+
+def get_meta(key):
+
+    db = get_db()
+
+    response = (
+        db.table("app_meta")
+        .select("value")
+        .eq("key", key)
+        .limit(1)
+        .execute()
     )
 
-    return conn
+    rows = response.data or []
+
+    if rows:
+        return rows[0]["value"]
+
+    return None
 
 
-def table_exists(conn, table_name):
-    result = conn.execute(
+def set_meta(
+    key,
+    value
+):
+
+    db = get_db()
+
+    (
+        db.table("app_meta")
+        .upsert(
+            {
+                "key": key,
+                "value": value,
+            },
+            on_conflict="key",
+        )
+        .execute()
+    )
+
+
+def find_profile_by_slug(slug):
+
+    if not slug:
+        return None
+
+    db = get_db()
+
+    response = (
+        db.table("profiles")
+        .select("*")
+        .eq("slug", slug.strip().lower())
+        .limit(1)
+        .execute()
+    )
+
+    rows = response.data or []
+
+    return rows[0] if rows else None
+
+
+def get_profile_by_slug(slug):
+
+    return find_profile_by_slug(slug)
+
+
+def _find_category_by_name(
+    profile_id,
+    name
+):
+
+    db = get_db()
+
+    response = (
+        db.table("profile_categories")
+        .select("*")
+        .eq("profile_id", profile_id)
+        .execute()
+    )
+
+    wanted = name.strip().casefold()
+
+    for row in (response.data or []):
+
+        if (
+            str(row.get("name", ""))
+            .strip()
+            .casefold()
+            == wanted
+        ):
+            return row
+
+    return None
+
+
+def _ensure_category(
+    profile_id,
+    name
+):
+
+    existing = _find_category_by_name(
+        profile_id,
+        name
+    )
+
+    if existing:
+        return existing["id"]
+
+    db = get_db()
+
+    response = (
+        db.table("profile_categories")
+        .insert(
+            {
+                "profile_id": profile_id,
+                "name": name.strip(),
+            }
+        )
+        .execute()
+    )
+
+    rows = response.data or []
+
+    if rows:
+        return rows[0]["id"]
+
+    # 極少數情況下，如果另一個 request 同時建立，
+    # 再讀一次即可。
+    existing = _find_category_by_name(
+        profile_id,
+        name
+    )
+
+    if existing:
+        return existing["id"]
+
+    raise RuntimeError(
+        f"無法建立分類：{name}"
+    )
+
+
+# ============================================================
+# 5. 初始化 Supabase 基本資料
+#
+# 資料表本身請先執行我附上的 supabase_setup.sql。
+# 這裡只負責建立固定四位 Profile 與各自的「未分類」。
+# ============================================================
+
+def init_db():
+
+    db = get_db()
+
+    try:
+
+        for profile in PROFILES:
+
+            (
+                db.table("profiles")
+                .upsert(
+                    {
+                        "slug": profile["slug"],
+                        "name": profile["name"],
+                    },
+                    on_conflict="slug",
+                )
+                .execute()
+            )
+
+        response = (
+            db.table("profiles")
+            .select("id,slug,name")
+            .execute()
+        )
+
+        for profile in (response.data or []):
+
+            if profile["slug"] in {
+                "honey",
+                "eirene",
+                "tinney",
+                "lyris",
+            }:
+
+                _ensure_category(
+                    profile["id"],
+                    "未分類"
+                )
+
+    except Exception as exc:
+
+        st.error(
+            "Supabase 已連線，但資料表尚未建立或權限設定不完整。\n\n"
+            "請先到 Supabase → SQL Editor 執行我附上的 "
+            "`supabase_setup.sql`。"
+        )
+
+        st.code(
+            str(exc)
+        )
+
+        st.stop()
+
+
+init_db()
+
+
+# ============================================================
+# 6. 一次性：如果目前環境還找得到舊 link_vault.db，
+#    自動把 SQLite 資料搬到 Supabase。
+#
+# 注意：
+# - 這只是「搶救／搬家」功能。
+# - 搬完後，所有新增／修改／刪除都只寫 Supabase。
+# - 舊單人版 categories / links 會歸到 Eirene。
+# ============================================================
+
+LOCAL_SQLITE_PATH = Path("link_vault.db")
+
+
+def sqlite_table_exists(
+    conn,
+    table_name
+):
+
+    row = conn.execute(
         """
         SELECT name
         FROM sqlite_master
@@ -67,682 +311,450 @@ def table_exists(conn, table_name):
         (table_name,)
     ).fetchone()
 
-    return result is not None
+    return row is not None
 
 
-def get_meta(conn, key):
-    row = conn.execute(
-        """
-        SELECT value
-        FROM app_meta
-        WHERE key = ?
-        """,
-        (key,)
-    ).fetchone()
+def _remote_link_exists(
+    profile_id,
+    title,
+    url,
+    created_at
+):
 
-    if row:
-        return row["value"]
+    db = get_db()
 
-    return None
+    query = (
+        db.table("profile_links")
+        .select("id")
+        .eq("profile_id", profile_id)
+        .eq("title", title)
+        .eq("url", url)
+        .eq("created_at", created_at or "")
+        .limit(1)
+    )
 
+    response = query.execute()
 
-def set_meta(conn, key, value):
-    conn.execute(
-        """
-        INSERT INTO app_meta (
-            key,
-            value
-        )
-        VALUES (?, ?)
-
-        ON CONFLICT(key)
-        DO UPDATE SET
-            value = excluded.value
-        """,
-        (
-            key,
-            value
-        )
+    return bool(
+        response.data
     )
 
 
-def init_db():
+def _insert_remote_link_if_missing(
+    profile_id,
+    title,
+    url,
+    category_id,
+    note,
+    created_at
+):
 
-    with get_db() as conn:
+    created_at = (
+        created_at
+        or ""
+    )
 
-        cursor = conn.cursor()
+    if _remote_link_exists(
+        profile_id,
+        title,
+        url,
+        created_at
+    ):
+        return
 
-        # ----------------------------------------------------
-        # App metadata
-        # ----------------------------------------------------
+    db = get_db()
 
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS app_meta (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-            """
+    (
+        db.table("profile_links")
+        .insert(
+            {
+                "profile_id": profile_id,
+                "title": title or "未命名收藏",
+                "url": url or "",
+                "category_id": category_id,
+                "note": note or "",
+                "created_at": created_at,
+            }
+        )
+        .execute()
+    )
+
+
+def migrate_local_sqlite_to_supabase():
+
+    # 已搬過就不再重複
+    if get_meta(
+        "sqlite_import_v1"
+    ) == "1":
+        return
+
+    # 目前環境沒有舊 SQLite，就先略過。
+    # 不寫入完成標記，避免日後有 DB 檔時失去搬家機會。
+    if not LOCAL_SQLITE_PATH.exists():
+        return
+
+    try:
+
+        local = sqlite3.connect(
+            LOCAL_SQLITE_PATH
         )
 
+        local.row_factory = sqlite3.Row
+
         # ----------------------------------------------------
-        # Profiles
+        # A. 新版多 Profile SQLite
         # ----------------------------------------------------
 
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS profiles (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                slug TEXT UNIQUE NOT NULL,
-                name TEXT NOT NULL
+        if (
+            sqlite_table_exists(
+                local,
+                "profiles"
             )
-            """
-        )
-
-        # ----------------------------------------------------
-        # 個人分類
-        # ----------------------------------------------------
-
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS profile_categories (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                profile_id INTEGER NOT NULL,
-                name TEXT COLLATE NOCASE NOT NULL,
-
-                UNIQUE (
-                    profile_id,
-                    name
-                ),
-
-                FOREIGN KEY (profile_id)
-                    REFERENCES profiles(id)
-                    ON DELETE CASCADE
+            and sqlite_table_exists(
+                local,
+                "profile_categories"
             )
-            """
-        )
-
-        # ----------------------------------------------------
-        # 個人收藏
-        # ----------------------------------------------------
-
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS profile_links (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                profile_id INTEGER NOT NULL,
-                title TEXT NOT NULL,
-                url TEXT NOT NULL,
-                category_id INTEGER,
-                note TEXT,
-                created_at TEXT,
-
-                FOREIGN KEY (profile_id)
-                    REFERENCES profiles(id)
-                    ON DELETE CASCADE,
-
-                FOREIGN KEY (category_id)
-                    REFERENCES profile_categories(id)
-            )
-            """
-        )
-
-        # ----------------------------------------------------
-        # 建立四位成員
-        # ----------------------------------------------------
-
-        for profile in PROFILES:
-
-            cursor.execute(
-                """
-                INSERT OR IGNORE INTO profiles (
-                    slug,
-                    name
-                )
-                VALUES (?, ?)
-                """,
-                (
-                    profile["slug"],
-                    profile["name"]
-                )
-            )
-
-        # ----------------------------------------------------
-        # 每個人一定都有「未分類」
-        # ----------------------------------------------------
-
-        profiles = cursor.execute(
-            """
-            SELECT id
-            FROM profiles
-            """
-        ).fetchall()
-
-        for profile in profiles:
-
-            cursor.execute(
-                """
-                INSERT OR IGNORE INTO profile_categories (
-                    profile_id,
-                    name
-                )
-                VALUES (?, '未分類')
-                """,
-                (
-                    profile["id"],
-                )
-            )
-
-        conn.commit()
-
-
-init_db()
-
-
-# ============================================================
-# 4. 舊版資料 → Eirene
-# ============================================================
-
-def migrate_legacy_data_to_eirene():
-
-    with get_db() as conn:
-
-        cursor = conn.cursor()
-
-        migration_key = "legacy_to_eirene_v3"
-
-        if get_meta(
-            conn,
-            migration_key
-        ) == "1":
-            return
-
-        # ----------------------------------------------------
-        # 找 Eirene
-        # ----------------------------------------------------
-
-        eirene = cursor.execute(
-            """
-            SELECT id
-            FROM profiles
-            WHERE slug = 'eirene'
-            """
-        ).fetchone()
-
-        if not eirene:
-            return
-
-        eirene_id = eirene["id"]
-
-        # ----------------------------------------------------
-        # 找 Honey
-        # ----------------------------------------------------
-
-        honey = cursor.execute(
-            """
-            SELECT id
-            FROM profiles
-            WHERE slug = 'honey'
-            """
-        ).fetchone()
-
-        honey_id = (
-            honey["id"]
-            if honey
-            else None
-        )
-
-        # ----------------------------------------------------
-        # 沒有舊版 links
-        # ----------------------------------------------------
-
-        if not table_exists(
-            conn,
-            "links"
         ):
 
-            set_meta(
-                conn,
-                migration_key,
-                "1"
-            )
-
-            conn.commit()
-
-            return
-
-        # ----------------------------------------------------
-        # 舊分類 → Eirene
-        # ----------------------------------------------------
-
-        category_map = {}
-
-        if table_exists(
-            conn,
-            "categories"
-        ):
-
-            old_categories = cursor.execute(
+            local_profiles = local.execute(
                 """
                 SELECT *
-                FROM categories
+                FROM profiles
                 """
             ).fetchall()
 
-            for old_category in old_categories:
+            profile_id_map = {}
 
-                old_name = (
-                    old_category["name"]
-                    or "未分類"
+            for local_profile in local_profiles:
+
+                slug = (
+                    local_profile["slug"]
+                    or ""
+                ).strip().lower()
+
+                name = (
+                    local_profile["name"]
+                    or slug
+                    or "User"
                 )
 
-                cursor.execute(
-                    """
-                    INSERT OR IGNORE
-                    INTO profile_categories (
-                        profile_id,
-                        name
-                    )
-                    VALUES (?, ?)
-                    """,
-                    (
-                        eirene_id,
-                        old_name
-                    )
-                )
+                if not slug:
+                    continue
 
-                new_category = cursor.execute(
-                    """
-                    SELECT id
-                    FROM profile_categories
-                    WHERE profile_id = ?
-                    AND name = ?
-                    """,
-                    (
-                        eirene_id,
-                        old_name
-                    )
-                ).fetchone()
+                db = get_db()
 
-                if new_category:
-
-                    category_map[
-                        old_category["id"]
-                    ] = new_category["id"]
-
-        # ----------------------------------------------------
-        # Eirene 未分類
-        # ----------------------------------------------------
-
-        uncategorized = cursor.execute(
-            """
-            SELECT id
-            FROM profile_categories
-            WHERE profile_id = ?
-            AND name = '未分類'
-            """,
-            (
-                eirene_id,
-            )
-        ).fetchone()
-
-        uncategorized_id = (
-            uncategorized["id"]
-            if uncategorized
-            else None
-        )
-
-        # ----------------------------------------------------
-        # 舊收藏 → Eirene
-        # ----------------------------------------------------
-
-        old_links = cursor.execute(
-            """
-            SELECT *
-            FROM links
-            ORDER BY id
-            """
-        ).fetchall()
-
-        for old_link in old_links:
-
-            new_category_id = category_map.get(
-                old_link["category_id"],
-                uncategorized_id
-            )
-
-            title = (
-                old_link["title"]
-                or "未命名收藏"
-            )
-
-            url = (
-                old_link["url"]
-                or ""
-            )
-
-            note = (
-                old_link["note"]
-                or ""
-            )
-
-            created_at = (
-                old_link["created_at"]
-                or ""
-            )
-
-            # ------------------------------------------------
-            # 避免重複
-            # ------------------------------------------------
-
-            already_exists = cursor.execute(
-                """
-                SELECT id
-                FROM profile_links
-
-                WHERE profile_id = ?
-                AND title = ?
-                AND url = ?
-                AND COALESCE(created_at, '') = ?
-
-                LIMIT 1
-                """,
                 (
-                    eirene_id,
-                    title,
-                    url,
-                    created_at
-                )
-            ).fetchone()
-
-            if not already_exists:
-
-                cursor.execute(
-                    """
-                    INSERT INTO profile_links (
-                        profile_id,
-                        title,
-                        url,
-                        category_id,
-                        note,
-                        created_at
+                    db.table("profiles")
+                    .upsert(
+                        {
+                            "slug": slug,
+                            "name": name,
+                        },
+                        on_conflict="slug",
                     )
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        eirene_id,
-                        title,
-                        url,
-                        new_category_id,
-                        note,
-                        created_at
+                    .execute()
+                )
+
+                remote_profile = (
+                    find_profile_by_slug(
+                        slug
                     )
                 )
 
-            # ------------------------------------------------
-            # 如果之前舊資料被搬到 Honey
-            # 將相同舊資料移除
-            # ------------------------------------------------
+                if remote_profile:
 
-            if honey_id:
+                    profile_id_map[
+                        local_profile["id"]
+                    ] = remote_profile["id"]
 
-                cursor.execute(
-                    """
-                    DELETE FROM profile_links
+            category_id_map = {}
 
-                    WHERE profile_id = ?
-                    AND title = ?
-                    AND url = ?
-                    AND COALESCE(created_at, '') = ?
-                    """,
-                    (
-                        honey_id,
-                        title,
-                        url,
-                        created_at
-                    )
-                )
-
-        set_meta(
-            conn,
-            migration_key,
-            "1"
-        )
-
-        conn.commit()
-
-
-migrate_legacy_data_to_eirene()
-
-
-# ============================================================
-# 5. Honey / Tinney / Lyris 初始分類清理
-#
-# 只執行一次。
-# Eirene 完全不動。
-# ============================================================
-
-def reset_other_profiles_categories():
-
-    with get_db() as conn:
-
-        cursor = conn.cursor()
-
-        migration_key = (
-            "reset_other_profiles_categories_v2"
-        )
-
-        if get_meta(
-            conn,
-            migration_key
-        ) == "1":
-
-            return
-
-        profile_slugs = [
-            "honey",
-            "tinney",
-            "lyris"
-        ]
-
-        for slug in profile_slugs:
-
-            profile = cursor.execute(
+            local_categories = local.execute(
                 """
-                SELECT id
-                FROM profiles
-                WHERE slug = ?
-                """,
-                (
-                    slug,
-                )
-            ).fetchone()
-
-            if not profile:
-                continue
-
-            profile_id = profile["id"]
-
-            # ------------------------------------------------
-            # 確保有未分類
-            # ------------------------------------------------
-
-            cursor.execute(
-                """
-                INSERT OR IGNORE
-                INTO profile_categories (
-                    profile_id,
-                    name
-                )
-                VALUES (?, '未分類')
-                """,
-                (
-                    profile_id,
-                )
-            )
-
-            uncategorized = cursor.execute(
-                """
-                SELECT id
+                SELECT *
                 FROM profile_categories
-
-                WHERE profile_id = ?
-                AND name = '未分類'
-                """,
-                (
-                    profile_id,
-                )
-            ).fetchone()
-
-            if not uncategorized:
-                continue
-
-            uncategorized_id = (
-                uncategorized["id"]
-            )
-
-            # ------------------------------------------------
-            # 收藏全部先放未分類
-            # ------------------------------------------------
-
-            cursor.execute(
+                ORDER BY id
                 """
-                UPDATE profile_links
+            ).fetchall()
 
-                SET category_id = ?
+            for local_category in local_categories:
 
-                WHERE profile_id = ?
-                AND (
-                    category_id IS NULL
-                    OR category_id != ?
+                remote_profile_id = (
+                    profile_id_map.get(
+                        local_category["profile_id"]
+                    )
                 )
-                """,
-                (
-                    uncategorized_id,
-                    profile_id,
-                    uncategorized_id
+
+                if not remote_profile_id:
+                    continue
+
+                remote_category_id = (
+                    _ensure_category(
+                        remote_profile_id,
+                        local_category["name"]
+                        or "未分類"
+                    )
                 )
+
+                category_id_map[
+                    local_category["id"]
+                ] = remote_category_id
+
+            if sqlite_table_exists(
+                local,
+                "profile_links"
+            ):
+
+                local_links = local.execute(
+                    """
+                    SELECT *
+                    FROM profile_links
+                    ORDER BY id
+                    """
+                ).fetchall()
+
+                for local_link in local_links:
+
+                    remote_profile_id = (
+                        profile_id_map.get(
+                            local_link["profile_id"]
+                        )
+                    )
+
+                    if not remote_profile_id:
+                        continue
+
+                    category_id = (
+                        category_id_map.get(
+                            local_link["category_id"]
+                        )
+                    )
+
+                    if not category_id:
+
+                        category_id = (
+                            _ensure_category(
+                                remote_profile_id,
+                                "未分類"
+                            )
+                        )
+
+                    _insert_remote_link_if_missing(
+                        profile_id=remote_profile_id,
+                        title=(
+                            local_link["title"]
+                            or "未命名收藏"
+                        ),
+                        url=(
+                            local_link["url"]
+                            or ""
+                        ),
+                        category_id=category_id,
+                        note=(
+                            local_link["note"]
+                            or ""
+                        ),
+                        created_at=(
+                            local_link["created_at"]
+                            or ""
+                        ),
+                    )
+
+        # ----------------------------------------------------
+        # B. 更舊的單人 SQLite
+        #    統一匯入 Eirene
+        # ----------------------------------------------------
+
+        if sqlite_table_exists(
+            local,
+            "links"
+        ):
+
+            eirene = find_profile_by_slug(
+                "eirene"
             )
 
-            # ------------------------------------------------
-            # 刪除其他分類
-            # ------------------------------------------------
+            if eirene:
 
-            cursor.execute(
-                """
-                DELETE FROM profile_categories
+                eirene_id = eirene["id"]
 
-                WHERE profile_id = ?
-                AND name != '未分類'
-                """,
-                (
-                    profile_id,
-                )
-            )
+                legacy_category_map = {}
+
+                if sqlite_table_exists(
+                    local,
+                    "categories"
+                ):
+
+                    legacy_categories = (
+                        local.execute(
+                            """
+                            SELECT *
+                            FROM categories
+                            ORDER BY id
+                            """
+                        ).fetchall()
+                    )
+
+                    for category in legacy_categories:
+
+                        remote_category_id = (
+                            _ensure_category(
+                                eirene_id,
+                                category["name"]
+                                or "未分類"
+                            )
+                        )
+
+                        legacy_category_map[
+                            category["id"]
+                        ] = remote_category_id
+
+                legacy_links = local.execute(
+                    """
+                    SELECT *
+                    FROM links
+                    ORDER BY id
+                    """
+                ).fetchall()
+
+                for link in legacy_links:
+
+                    category_id = (
+                        legacy_category_map.get(
+                            link["category_id"]
+                        )
+                    )
+
+                    if not category_id:
+
+                        category_id = (
+                            _ensure_category(
+                                eirene_id,
+                                "未分類"
+                            )
+                        )
+
+                    _insert_remote_link_if_missing(
+                        profile_id=eirene_id,
+                        title=(
+                            link["title"]
+                            or "未命名收藏"
+                        ),
+                        url=(
+                            link["url"]
+                            or ""
+                        ),
+                        category_id=category_id,
+                        note=(
+                            link["note"]
+                            or ""
+                        ),
+                        created_at=(
+                            link["created_at"]
+                            or ""
+                        ),
+                    )
+
+        local.close()
 
         set_meta(
-            conn,
-            migration_key,
+            "sqlite_import_v1",
             "1"
         )
 
-        conn.commit()
+    except Exception as exc:
+
+        # 不讓搬家失敗影響正常使用。
+        # App 仍然會使用 Supabase 永久儲存。
+        print(
+            "SQLite → Supabase migration skipped:",
+            exc
+        )
 
 
-reset_other_profiles_categories()
-
-
-# ============================================================
-# 6. Profile 功能
-# ============================================================
-
-def get_profile_by_slug(slug):
-
-    if not slug:
-        return None
-
-    with get_db() as conn:
-
-        return conn.execute(
-            """
-            SELECT *
-            FROM profiles
-            WHERE LOWER(slug) = LOWER(?)
-            """,
-            (
-                slug.strip(),
-            )
-        ).fetchone()
+migrate_local_sqlite_to_supabase()
 
 
 # ============================================================
 # 7. 分類功能
 # ============================================================
 
-def fetch_categories(profile_id):
+def fetch_categories(
+    profile_id
+):
 
-    with get_db() as conn:
+    db = get_db()
 
-        return conn.execute(
-            """
-            SELECT *
-            FROM profile_categories
+    response = (
+        db.table("profile_categories")
+        .select("*")
+        .eq("profile_id", profile_id)
+        .execute()
+    )
 
-            WHERE profile_id = ?
+    rows = response.data or []
 
-            ORDER BY
-                CASE
-                    WHEN name = '未分類'
-                    THEN 1
-                    ELSE 0
-                END,
+    rows.sort(
+        key=lambda row: (
+            1
+            if row["name"] == "未分類"
+            else 0,
+            str(row["name"]).casefold(),
+        )
+    )
 
-                name COLLATE NOCASE
-            """,
-            (
-                profile_id,
-            )
-        ).fetchall()
+    return rows
 
 
 def fetch_categories_with_counts(
     profile_id
 ):
 
-    with get_db() as conn:
+    categories = fetch_categories(
+        profile_id
+    )
 
-        return conn.execute(
-            """
-            SELECT
-                c.id,
-                c.name,
-                COUNT(l.id) AS link_count
+    db = get_db()
 
-            FROM profile_categories c
+    response = (
+        db.table("profile_links")
+        .select("id,category_id")
+        .eq("profile_id", profile_id)
+        .execute()
+    )
 
-            LEFT JOIN profile_links l
-                ON l.category_id = c.id
-                AND l.profile_id = c.profile_id
+    counts = {}
 
-            WHERE c.profile_id = ?
+    for link in (response.data or []):
 
-            GROUP BY
-                c.id,
-                c.name
+        category_id = (
+            link.get("category_id")
+        )
 
-            ORDER BY
-                CASE
-                    WHEN c.name = '未分類'
-                    THEN 1
-                    ELSE 0
-                END,
-
-                c.name COLLATE NOCASE
-            """,
-            (
-                profile_id,
+        counts[category_id] = (
+            counts.get(
+                category_id,
+                0
             )
-        ).fetchall()
+            + 1
+        )
+
+    result = []
+
+    for category in categories:
+
+        result.append(
+            {
+                "id": category["id"],
+                "name": category["name"],
+                "link_count": counts.get(
+                    category["id"],
+                    0
+                ),
+            }
+        )
+
+    return result
 
 
 def add_category(
@@ -755,31 +767,32 @@ def add_category(
     if not name:
         return False
 
-    with get_db() as conn:
+    if _find_category_by_name(
+        profile_id,
+        name
+    ):
+        return False
 
-        try:
+    db = get_db()
 
-            conn.execute(
-                """
-                INSERT INTO profile_categories (
-                    profile_id,
-                    name
-                )
-                VALUES (?, ?)
-                """,
-                (
-                    profile_id,
-                    name
-                )
+    try:
+
+        (
+            db.table("profile_categories")
+            .insert(
+                {
+                    "profile_id": profile_id,
+                    "name": name,
+                }
             )
+            .execute()
+        )
 
-            conn.commit()
+        return True
 
-            return True
+    except Exception:
 
-        except sqlite3.IntegrityError:
-
-            return False
+        return False
 
 
 def rename_category(
@@ -797,69 +810,75 @@ def rename_category(
             "分類名稱不能為空白。"
         )
 
-    with get_db() as conn:
+    db = get_db()
 
-        cursor = conn.cursor()
+    response = (
+        db.table("profile_categories")
+        .select("*")
+        .eq("id", category_id)
+        .eq("profile_id", profile_id)
+        .limit(1)
+        .execute()
+    )
 
-        category = cursor.execute(
-            """
-            SELECT *
-            FROM profile_categories
+    rows = response.data or []
 
-            WHERE id = ?
-            AND profile_id = ?
-            """,
-            (
-                category_id,
-                profile_id
+    if not rows:
+
+        return (
+            False,
+            "找不到這個分類。"
+        )
+
+    category = rows[0]
+
+    if category["name"] == "未分類":
+
+        return (
+            False,
+            "「未分類」不能重新命名。"
+        )
+
+    existing = _find_category_by_name(
+        profile_id,
+        new_name
+    )
+
+    if (
+        existing
+        and existing["id"] != category_id
+    ):
+
+        return (
+            False,
+            "這個分類名稱已經存在。"
+        )
+
+    try:
+
+        (
+            db.table("profile_categories")
+            .update(
+                {
+                    "name": new_name,
+                }
             )
-        ).fetchone()
+            .eq("id", category_id)
+            .eq("profile_id", profile_id)
+            .execute()
+        )
 
-        if not category:
+        return (
+            True,
+            None
+        )
 
-            return (
-                False,
-                "找不到這個分類。"
-            )
+    except Exception:
 
-        if category["name"] == "未分類":
-
-            return (
-                False,
-                "「未分類」不能重新命名。"
-            )
-
-        try:
-
-            cursor.execute(
-                """
-                UPDATE profile_categories
-
-                SET name = ?
-
-                WHERE id = ?
-                AND profile_id = ?
-                """,
-                (
-                    new_name,
-                    category_id,
-                    profile_id
-                )
-            )
-
-            conn.commit()
-
-            return (
-                True,
-                None
-            )
-
-        except sqlite3.IntegrityError:
-
-            return (
-                False,
-                "這個分類名稱已經存在。"
-            )
+        return (
+            False,
+            "分類名稱更新失敗。"
+        )
 
 
 def delete_category(
@@ -867,73 +886,48 @@ def delete_category(
     category_id
 ):
 
-    with get_db() as conn:
-
-        cursor = conn.cursor()
-
-        uncategorized = cursor.execute(
-            """
-            SELECT id
-            FROM profile_categories
-
-            WHERE profile_id = ?
-            AND name = '未分類'
-            """,
-            (
-                profile_id,
-            )
-        ).fetchone()
-
-        if not uncategorized:
-            return False
-
-        uncategorized_id = (
-            uncategorized["id"]
+    uncategorized = (
+        _find_category_by_name(
+            profile_id,
+            "未分類"
         )
+    )
 
-        if category_id == uncategorized_id:
-            return False
+    if not uncategorized:
+        return False
 
-        # ----------------------------------------------------
-        # 收藏移到未分類
-        # ----------------------------------------------------
+    uncategorized_id = (
+        uncategorized["id"]
+    )
 
-        cursor.execute(
-            """
-            UPDATE profile_links
+    if category_id == uncategorized_id:
+        return False
 
-            SET category_id = ?
+    db = get_db()
 
-            WHERE profile_id = ?
-            AND category_id = ?
-            """,
-            (
-                uncategorized_id,
-                profile_id,
-                category_id
-            )
+    # 收藏先移到未分類
+    (
+        db.table("profile_links")
+        .update(
+            {
+                "category_id": uncategorized_id,
+            }
         )
+        .eq("profile_id", profile_id)
+        .eq("category_id", category_id)
+        .execute()
+    )
 
-        # ----------------------------------------------------
-        # 刪除分類
-        # ----------------------------------------------------
+    # 再刪分類
+    (
+        db.table("profile_categories")
+        .delete()
+        .eq("id", category_id)
+        .eq("profile_id", profile_id)
+        .execute()
+    )
 
-        cursor.execute(
-            """
-            DELETE FROM profile_categories
-
-            WHERE id = ?
-            AND profile_id = ?
-            """,
-            (
-                category_id,
-                profile_id
-            )
-        )
-
-        conn.commit()
-
-        return True
+    return True
 
 
 # ============================================================
@@ -952,31 +946,22 @@ def add_link(
         "%Y-%m-%d %H:%M"
     )
 
-    with get_db() as conn:
+    db = get_db()
 
-        conn.execute(
-            """
-            INSERT INTO profile_links (
-                profile_id,
-                title,
-                url,
-                category_id,
-                note,
-                created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                profile_id,
-                title.strip(),
-                url.strip(),
-                category_id,
-                note.strip(),
-                now
-            )
+    (
+        db.table("profile_links")
+        .insert(
+            {
+                "profile_id": profile_id,
+                "title": title.strip(),
+                "url": url.strip(),
+                "category_id": category_id,
+                "note": note.strip(),
+                "created_at": now,
+            }
         )
-
-        conn.commit()
+        .execute()
+    )
 
 
 def update_link(
@@ -988,32 +973,22 @@ def update_link(
     note=""
 ):
 
-    with get_db() as conn:
+    db = get_db()
 
-        conn.execute(
-            """
-            UPDATE profile_links
-
-            SET
-                title = ?,
-                url = ?,
-                category_id = ?,
-                note = ?
-
-            WHERE id = ?
-            AND profile_id = ?
-            """,
-            (
-                title.strip(),
-                url.strip(),
-                category_id,
-                note.strip(),
-                link_id,
-                profile_id
-            )
+    (
+        db.table("profile_links")
+        .update(
+            {
+                "title": title.strip(),
+                "url": url.strip(),
+                "category_id": category_id,
+                "note": note.strip(),
+            }
         )
-
-        conn.commit()
+        .eq("id", link_id)
+        .eq("profile_id", profile_id)
+        .execute()
+    )
 
 
 def delete_link(
@@ -1021,22 +996,15 @@ def delete_link(
     link_id
 ):
 
-    with get_db() as conn:
+    db = get_db()
 
-        conn.execute(
-            """
-            DELETE FROM profile_links
-
-            WHERE id = ?
-            AND profile_id = ?
-            """,
-            (
-                link_id,
-                profile_id
-            )
-        )
-
-        conn.commit()
+    (
+        db.table("profile_links")
+        .delete()
+        .eq("id", link_id)
+        .eq("profile_id", profile_id)
+        .execute()
+    )
 
 
 def fetch_links(
@@ -1045,75 +1013,113 @@ def fetch_links(
     keyword=""
 ):
 
-    query = """
-        SELECT
-            l.*,
-            c.name AS category_name
+    db = get_db()
 
-        FROM profile_links l
-
-        LEFT JOIN profile_categories c
-            ON l.category_id = c.id
-
-        WHERE l.profile_id = ?
-    """
-
-    params = [
-        profile_id
-    ]
-
-    # --------------------------------------------------------
-    # 分類
-    # --------------------------------------------------------
+    query = (
+        db.table("profile_links")
+        .select("*")
+        .eq("profile_id", profile_id)
+    )
 
     if category_id is not None:
 
-        query += """
-            AND l.category_id = ?
-        """
-
-        params.append(
+        query = query.eq(
+            "category_id",
             category_id
         )
 
+    response = query.execute()
+
+    rows = response.data or []
+
     # --------------------------------------------------------
-    # 搜尋
+    # 分類名稱 Join
+    #
+    # 家庭收藏量很小，這樣做最簡單、穩定，
+    # 不依賴 PostgREST relation alias。
     # --------------------------------------------------------
 
-    keyword = keyword.strip()
+    categories = fetch_categories(
+        profile_id
+    )
 
-    if keyword:
+    category_names = {
+        category["id"]: category["name"]
+        for category in categories
+    }
 
-        query += """
-            AND (
-                l.title LIKE ?
-                OR l.note LIKE ?
-                OR l.url LIKE ?
-                OR c.name LIKE ?
+    result = []
+
+    keyword_normalized = (
+        keyword.strip().casefold()
+    )
+
+    for row in rows:
+
+        item = dict(row)
+
+        category_name = (
+            category_names.get(
+                item.get("category_id"),
+                "未分類"
             )
-        """
-
-        search_value = (
-            f"%{keyword}%"
         )
 
-        params.extend([
-            search_value,
-            search_value,
-            search_value,
-            search_value
-        ])
+        item["category_name"] = (
+            category_name
+        )
 
-    query += """
-        ORDER BY l.id DESC
-    """
+        if keyword_normalized:
 
-    with get_db() as conn:
+            haystack = " ".join(
+                [
+                    str(
+                        item.get(
+                            "title",
+                            ""
+                        )
+                        or ""
+                    ),
+                    str(
+                        item.get(
+                            "url",
+                            ""
+                        )
+                        or ""
+                    ),
+                    str(
+                        item.get(
+                            "note",
+                            ""
+                        )
+                        or ""
+                    ),
+                    str(
+                        category_name
+                        or ""
+                    ),
+                ]
+            ).casefold()
 
-        return conn.execute(
-            query,
-            params
-        ).fetchall()
+            if (
+                keyword_normalized
+                not in haystack
+            ):
+                continue
+
+        result.append(
+            item
+        )
+
+    result.sort(
+        key=lambda item: (
+            item.get("id")
+            or 0
+        ),
+        reverse=True
+    )
+
+    return result
 
 
 # ============================================================
