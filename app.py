@@ -19,13 +19,13 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-PAGE_ADD = "➕ 新增收藏"
+PAGE_ADD = "🎯 新增收藏"
 PAGE_LIBRARY = "📚 收藏庫"
-PAGE_CATEGORIES = "🏷️ 分類"
+PAGE_CATEGORIES = "🎞 分類"
 
 PROFILE_SLUG = "eirene"
-PROFILE_NAME = "Eirene"
-PROFILE_ICON = "💜"
+PROFILE_NAME = "Eirene 🎀"
+PROFILE_ICON = "🎀"
 
 
 # ============================================================
@@ -771,8 +771,9 @@ textarea::placeholder {
     border-color: #B196E4 !important;
 }
 
-/* 紫色 Primary / Form Submit */
+/* 紫色 Primary / Form Submit：紫底黑字 */
 button[kind="primary"],
+button[data-testid^="stBaseButton-primary"],
 [data-testid="stFormSubmitButton"] button {
     background-color: #B196E4 !important;
     color: #212121 !important;
@@ -781,11 +782,52 @@ button[kind="primary"],
     font-weight: 700 !important;
 }
 
+/* Streamlit 會在 button 裡再包 MarkdownContainer / p / span，
+   所以要把內層文字也強制設成黑色 */
+button[kind="primary"] *,
+button[data-testid^="stBaseButton-primary"] *,
+[data-testid="stFormSubmitButton"] button *,
+[data-testid="stFormSubmitButton"] [data-testid="stMarkdownContainer"],
+[data-testid="stFormSubmitButton"] [data-testid="stMarkdownContainer"] p,
+[data-testid="stFormSubmitButton"] [data-testid="stMarkdownContainer"] span {
+    color: #212121 !important;
+    -webkit-text-fill-color: #212121 !important;
+}
+
 button[kind="primary"]:hover,
+button[data-testid^="stBaseButton-primary"]:hover,
 [data-testid="stFormSubmitButton"] button:hover {
     background-color: #BDA6E8 !important;
     color: #212121 !important;
     border-color: #BDA6E8 !important;
+}
+
+button[kind="primary"]:hover *,
+button[data-testid^="stBaseButton-primary"]:hover *,
+[data-testid="stFormSubmitButton"] button:hover * {
+    color: #212121 !important;
+    -webkit-text-fill-color: #212121 !important;
+}
+
+button[kind="primary"]:focus,
+button[kind="primary"]:active,
+button[data-testid^="stBaseButton-primary"]:focus,
+button[data-testid^="stBaseButton-primary"]:active,
+[data-testid="stFormSubmitButton"] button:focus,
+[data-testid="stFormSubmitButton"] button:active {
+    background-color: #B196E4 !important;
+    color: #212121 !important;
+    border-color: #B196E4 !important;
+}
+
+button[kind="primary"]:focus *,
+button[kind="primary"]:active *,
+button[data-testid^="stBaseButton-primary"]:focus *,
+button[data-testid^="stBaseButton-primary"]:active *,
+[data-testid="stFormSubmitButton"] button:focus *,
+[data-testid="stFormSubmitButton"] button:active * {
+    color: #212121 !important;
+    -webkit-text-fill-color: #212121 !important;
 }
 
 /* 開啟連結 */
@@ -797,12 +839,27 @@ button[kind="primary"]:hover,
     font-weight: 700 !important;
 }
 
+/* 強制按鈕內所有文字也是黑色 */
+[data-testid="stLinkButton"] a *,
+[data-testid="stLinkButton"] a p,
+[data-testid="stLinkButton"] a span {
+    color: #212121 !important;
+    -webkit-text-fill-color: #212121 !important;
+}
+
+/* 滑鼠移上去 */
 [data-testid="stLinkButton"] a:hover {
     background-color: #BDA6E8 !important;
     color: #212121 !important;
     border-color: #BDA6E8 !important;
 }
 
+[data-testid="stLinkButton"] a:hover *,
+[data-testid="stLinkButton"] a:hover p,
+[data-testid="stLinkButton"] a:hover span {
+    color: #212121 !important;
+    -webkit-text-fill-color: #212121 !important;
+}
 /* Segmented control：固定跟下方表單同寬，三格平均 */
 [data-testid="stSegmentedControl"] {
     width: 100% !important;
