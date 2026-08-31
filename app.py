@@ -24,7 +24,7 @@ PAGE_LIBRARY = "📚 收藏庫"
 PAGE_CATEGORIES = "🎞 分類"
 
 PROFILE_SLUG = "eirene"
-PROFILE_NAME = "Eirene"
+PROFILE_NAME = "Eirene 🎀"
 PROFILE_ICON = "🎀"
 
 
