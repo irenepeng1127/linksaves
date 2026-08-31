@@ -19,13 +19,13 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-PAGE_ADD = "🎯 新增收藏"
+PAGE_ADD = "➕ 新增收藏"
 PAGE_LIBRARY = "📚 收藏庫"
-PAGE_CATEGORIES = "🎞 分類"
+PAGE_CATEGORIES = "🏷️ 分類"
 
 PROFILE_SLUG = "eirene"
-PROFILE_NAME = "Eirene 🎀"
-PROFILE_ICON = "🎀"
+PROFILE_NAME = "Eirene"
+PROFILE_ICON = "💜"
 
 
 # ============================================================
@@ -781,20 +781,6 @@ button[kind="primary"],
     font-weight: 700 !important;
 }
 
-
-/* 強制裡面的文字也黑色 */
-button[kind="primary"] *,
-button[kind="primary"] p,
-button[kind="primary"] span,
-[data-testid="stFormSubmitButton"] button *,
-[data-testid="stFormSubmitButton"] button p,
-[data-testid="stFormSubmitButton"] button span {
-    color: #212121 !important;
-    -webkit-text-fill-color: #212121 !important;
-}
-
-
-/* Hover */
 button[kind="primary"]:hover,
 [data-testid="stFormSubmitButton"] button:hover {
     background-color: #BDA6E8 !important;
@@ -802,17 +788,21 @@ button[kind="primary"]:hover,
     border-color: #BDA6E8 !important;
 }
 
-
-/* Hover 時裡面的文字也黑色 */
-button[kind="primary"]:hover *,
-button[kind="primary"]:hover p,
-button[kind="primary"]:hover span,
-[data-testid="stFormSubmitButton"] button:hover *,
-[data-testid="stFormSubmitButton"] button:hover p,
-[data-testid="stFormSubmitButton"] button:hover span {
+/* 開啟連結 */
+[data-testid="stLinkButton"] a {
+    background-color: #B196E4 !important;
     color: #212121 !important;
-    -webkit-text-fill-color: #212121 !important;
+    border: 1px solid #B196E4 !important;
+    border-radius: 11px !important;
+    font-weight: 700 !important;
 }
+
+[data-testid="stLinkButton"] a:hover {
+    background-color: #BDA6E8 !important;
+    color: #212121 !important;
+    border-color: #BDA6E8 !important;
+}
+
 /* Segmented control：固定跟下方表單同寬，三格平均 */
 [data-testid="stSegmentedControl"] {
     width: 100% !important;
