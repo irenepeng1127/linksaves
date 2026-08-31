@@ -706,7 +706,7 @@ div[class*="viewerBadge_link__"] {
 }
 
 h1, h2, h3, h4, h5, h6 {
-    color: #FFFFFF !important;
+    color: #212121 !important;
 }
 
 .stApp p,
@@ -730,12 +730,12 @@ h1, h2, h3, h4, h5, h6 {
 
 [data-baseweb="input"] input,
 [data-baseweb="textarea"] textarea {
-    color: #FFFFFF !important;
+    color: #212121 !important;
     background-color: transparent !important;
 }
 
 [data-baseweb="select"] span {
-    color: #FFFFFF !important;
+    color: #212121 !important;
 }
 
 input::placeholder,
@@ -760,14 +760,14 @@ textarea::placeholder {
 /* 一般按鈕 */
 .stButton > button {
     background-color: #2B2B31 !important;
-    color: #FFFFFF !important;
+    color: #212121 !important;
     border: 1px solid #50505A !important;
     border-radius: 11px !important;
 }
 
 .stButton > button:hover {
     background-color: #36363E !important;
-    color: #FFFFFF !important;
+    color: #212121 !important;
     border-color: #B196E4 !important;
 }
 
