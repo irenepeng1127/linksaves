@@ -860,25 +860,47 @@ button[data-testid^="stBaseButton-primary"]:active *,
     color: #212121 !important;
     -webkit-text-fill-color: #212121 !important;
 }
-/* Segmented control：固定跟下方表單同寬，三格平均 */
+/* Segmented control：桌機與手機都固定三格完全等寬 */
 [data-testid="stSegmentedControl"] {
     width: 100% !important;
+    max-width: 100% !important;
 }
 
 [data-testid="stSegmentedControl"] > div {
     width: 100% !important;
+    max-width: 100% !important;
 }
 
+/* 不讓文字長度影響三格寬度 */
 [data-testid="stSegmentedControl"] [role="radiogroup"] {
-    display: flex !important;
+    display: grid !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
     width: 100% !important;
+    max-width: 100% !important;
+    gap: 0 !important;
+}
+
+/* 某些 Streamlit 版本會在 button 外再包一層 */
+[data-testid="stSegmentedControl"] [role="radiogroup"] > div {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
 }
 
 [data-testid="stSegmentedControl"] button {
-    flex: 1 1 0 !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
     justify-content: center !important;
+    text-align: center !important;
+    white-space: nowrap !important;
     color: #E5E5E5 !important;
     border-color: #4B4B55 !important;
+}
+
+[data-testid="stSegmentedControl"] button * {
+    justify-content: center !important;
+    text-align: center !important;
 }
 
 [data-testid="stSegmentedControl"] button[aria-pressed="true"] {
@@ -886,6 +908,11 @@ button[data-testid^="stBaseButton-primary"]:active *,
     color: #212121 !important;
     border-color: #B196E4 !important;
     font-weight: 700 !important;
+}
+
+[data-testid="stSegmentedControl"] button[aria-pressed="true"] * {
+    color: #212121 !important;
+    -webkit-text-fill-color: #212121 !important;
 }
 
 hr {
@@ -982,7 +1009,7 @@ if st.session_state["flash_message"]:
 # ============================================================
 
 if active_page == PAGE_ADD:
-    st.markdown("### 🎯 快速收藏")
+    st.markdown("### 快速收藏")
 
     with st.form(
         "add_link_form_eirene",
@@ -1191,7 +1218,7 @@ elif active_page == PAGE_LIBRARY:
                 category_name = item.get("category_name") or "未分類"
 
                 st.caption(
-                    f"🎞 {category_name}　·　🕒 {item.get('created_at', '')}"
+                    f"🏷️ {category_name}　·　🕒 {item.get('created_at', '')}"
                 )
 
                 if item.get("note"):
@@ -1266,7 +1293,7 @@ elif active_page == PAGE_LIBRARY:
 # ============================================================
 
 elif active_page == PAGE_CATEGORIES:
-    st.markdown("### 🎞 分類管理")
+    st.markdown("### 🏷️ 分類管理")
     st.caption("新增、重新命名或刪除你的收藏分類。")
 
     st.markdown("#### ＋ 新增分類")
@@ -1378,7 +1405,7 @@ elif active_page == PAGE_CATEGORIES:
                 col_info, col_edit, col_delete = st.columns([5, 1, 1])
 
                 with col_info:
-                    st.markdown(f"**🎞 {category_name}**")
+                    st.markdown(f"**🏷️ {category_name}**")
                     st.caption(f"{link_count} 筆收藏")
 
                 with col_edit:
