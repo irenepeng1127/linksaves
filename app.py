@@ -982,7 +982,7 @@ if st.session_state["flash_message"]:
 # ============================================================
 
 if active_page == PAGE_ADD:
-    st.markdown("### 快速收藏")
+    st.markdown("### 🎯 快速收藏")
 
     with st.form(
         "add_link_form_eirene",
@@ -1191,7 +1191,7 @@ elif active_page == PAGE_LIBRARY:
                 category_name = item.get("category_name") or "未分類"
 
                 st.caption(
-                    f"🏷️ {category_name}　·　🕒 {item.get('created_at', '')}"
+                    f"🎞 {category_name}　·　🕒 {item.get('created_at', '')}"
                 )
 
                 if item.get("note"):
@@ -1266,7 +1266,7 @@ elif active_page == PAGE_LIBRARY:
 # ============================================================
 
 elif active_page == PAGE_CATEGORIES:
-    st.markdown("### 🏷️ 分類管理")
+    st.markdown("### 🎞 分類管理")
     st.caption("新增、重新命名或刪除你的收藏分類。")
 
     st.markdown("#### ＋ 新增分類")
@@ -1378,7 +1378,7 @@ elif active_page == PAGE_CATEGORIES:
                 col_info, col_edit, col_delete = st.columns([5, 1, 1])
 
                 with col_info:
-                    st.markdown(f"**🏷️ {category_name}**")
+                    st.markdown(f"**🎞 {category_name}**")
                     st.caption(f"{link_count} 筆收藏")
 
                 with col_edit:
