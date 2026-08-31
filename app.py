@@ -663,8 +663,35 @@ APP_CSS = """
     color: #F5F5F5 !important;
 }
 
-[data-testid="stHeader"] {
-    background-color: rgba(33, 33, 33, 0.94) !important;
+/* Streamlit 自帶的上方工具列全部隱藏 */
+header[data-testid="stHeader"],
+[data-testid="stHeader"],
+[data-testid="stToolbar"],
+[data-testid="stAppToolbar"],
+[data-testid="stDecoration"],
+[data-testid="stStatusWidget"],
+[data-testid="stAppDeployButton"] {
+    display: none !important;
+    visibility: hidden !important;
+    height: 0 !important;
+    min-height: 0 !important;
+}
+
+#MainMenu {
+    display: none !important;
+    visibility: hidden !important;
+}
+
+footer,
+[data-testid="stFooter"] {
+    display: none !important;
+    visibility: hidden !important;
+}
+
+/* Community Cloud 的底部 Hosted with Streamlit badge */
+div[class*="viewerBadge_container__"],
+div[class*="viewerBadge_link__"] {
+    display: none !important;
 }
 
 [data-testid="stMainBlockContainer"] {
@@ -672,7 +699,7 @@ APP_CSS = """
     max-width: 720px !important;
     margin-left: auto !important;
     margin-right: auto !important;
-    padding-top: 1.25rem !important;
+    padding-top: 0.8rem !important;
     padding-bottom: 2rem !important;
     padding-left: 0 !important;
     padding-right: 0 !important;
@@ -818,7 +845,7 @@ hr {
         max-width: 100% !important;
         padding-left: 14px !important;
         padding-right: 14px !important;
-        padding-top: 1rem !important;
+        padding-top: 0.65rem !important;
     }
 }
 
